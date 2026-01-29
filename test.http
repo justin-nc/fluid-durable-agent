@@ -1,0 +1,47 @@
+GET http://localhost:7071/api/durable/ping
+
+###
+POST http://localhost:7071/api/agents/MyDurableAgent/run
+
+My email address is j.d@nc.gov, my name is John Doe.
+
+####
+POST http://localhost:7071/api/agents/MyDurableAgent/run?thread_id=766a0d3b-f6fb-4e2a-9a3a-5a0932c3d3e8
+
+My email address is j.d@nc.gov, my name is John Doe.
+
+###
+
+####
+POST http://localhost:7071/api/agents/MyDurableAgent/run?thread_id=fcf5fdd5-8f4c-412f-9f49-e1e2aca37314
+
+save it
+
+###
+GET http://localhost:7071/api/FormFieldNext?thread_id=34deedb154bb4f57ba7bb89afe9c029d
+
+###
+
+POST http://localhost:7071/api/session
+Content-Type: application/json
+
+{
+  "FormCode": "pronav"
+}
+
+###
+
+
+
+POST http://localhost:7071/api/session/dbe448192c7d45f78133271f92c6c61f/message
+
+We will be seeking a HUB vendor.  We have already reached out to several of them to find out who can provide this.
+I'm john doe; j.doe@nc.gov and the project owner is Joe Smith; joe.smith@nc.gov
+This procurement is for a new software platform to host virtual machines.  We don't currently have 
+such a system and our customers desperately need it.  The budget is around $250,000 and we need it by the end of Q3 2026
+
+
+###
+POST http://localhost:7071/api/session/dbe448192c7d45f78133271f92c6c61f/message
+
+The Agency for this procurement is NCDIT, and the Division is Enterprise Applications.

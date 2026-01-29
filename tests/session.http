@@ -1,0 +1,39 @@
+# @name createSession
+POST http://localhost:7071/api/session
+Content-Type: application/json
+
+{
+  "FormCode": "pronav"
+}
+
+###
+@instanceId = {{createSession.response.body.instanceId}}
+
+####
+
+
+POST http://localhost:7071/api/session/{{instanceId}}/message
+
+We will be seeking a HUB vendor.  We have already reached out to several of them to find out who can provide this.
+I'm john doe; j.doe@nc.gov and the project owner is Joe Smith; joe.smith@nc.gov
+This procurement is for a new software platform to host virtual machines.  We don't currently have 
+such a system and our customers desperately need it.  The budget is around $250,000 and we need it by the end of Q3 2026
+
+
+###
+POST http://localhost:7071/api/session/{{instanceId}}/message
+
+The Agency name for this procurement is NCDIT, and the Division is Enterprise Applications.
+
+###
+POST http://localhost:7071/api/session/{{instanceId}}/message
+
+The owner is jane smith.
+
+###
+POST http://localhost:7071/api/session/{{instanceId}}/fields
+
+{ "newFieldValues": [{ "fieldName": "ProjectOwnerEmail", "value": "jane.smith@nc.gov"}]}
+
+####
+GET http://localhost:7071/api/session/{{instanceId}}/fields
