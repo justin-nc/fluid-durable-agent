@@ -21,12 +21,16 @@ public class SessionOrchestrator
     private readonly BlobStorageService _blobStorageService;
     private readonly Agent_FieldCompletion _fieldCompletionAgent;
     private readonly Agent_FieldValidation _fieldValidationAgent;
+    private readonly Agent_Conversation _conversationAgent;
+    private readonly ILogger<SessionOrchestrator> _logger;
 
-    public SessionOrchestrator(BlobStorageService blobStorageService, Agent_FieldCompletion fieldCompletionAgent, Agent_FieldValidation fieldValidationAgent)
+    public SessionOrchestrator(BlobStorageService blobStorageService, Agent_FieldCompletion fieldCompletionAgent, Agent_FieldValidation fieldValidationAgent, Agent_Conversation conversationAgent,  ILogger<SessionOrchestrator> logger)
     {
         _blobStorageService = blobStorageService;
         _fieldCompletionAgent = fieldCompletionAgent;
         _fieldValidationAgent = fieldValidationAgent;
+        _conversationAgent = conversationAgent;
+        _logger = logger;
     }
 
     [Function(OrchestratorName)]
@@ -60,8 +64,15 @@ public class SessionOrchestrator
                     
                     if (messageData != null)
                     {
-                        state.NewMessage = messageData.Message ?? string.Empty;
-                        state.History.Add(messageData.Message ?? string.Empty);
+                        // Add all messages to history
+                        if (messageData.Messages != null && messageData.Messages.Count > 0)
+                        {
+                            foreach (var msg in messageData.Messages)
+                            {
+                                state.History.Add(msg);
+                            }
+                            state.NewMessage = messageData.Messages[messageData.Messages.Count - 1];
+                        }
                         
                         // Update field completions if provided
                         if (messageData.FieldCompletions != null && messageData.FieldCompletions.Count > 0)
@@ -75,10 +86,24 @@ public class SessionOrchestrator
                     var formActionData = JsonSerializer.Deserialize<FormActionEventData>(eventData, 
                         new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
                     
-                    if (formActionData?.NewFieldValues != null && formActionData.NewFieldValues.Count > 0)
+                    if (formActionData != null)
                     {
-                        UpdateFieldValues(state, formActionData.NewFieldValues, "(Updated via form_action)");
+                        // Add messages to history if provided
+                        if (formActionData.Messages != null && formActionData.Messages.Count > 0)
+                        {
+                            foreach (var msg in formActionData.Messages)
+                            {
+                                state.History.Add(msg);
+                            }
+                        }
+                        
+                        // Update field values if provided
+                        if (formActionData.NewFieldValues != null && formActionData.NewFieldValues.Count > 0)
+                        {
+                            UpdateFieldValues(state, formActionData.NewFieldValues, "(Updated via form_action)");
+                        }
                     }
+
                     logger.LogInformation("Updated {Count} field values via form_action", formActionData?.NewFieldValues?.Count ?? 0);
                     break;
                 default:
@@ -104,32 +129,71 @@ public class SessionOrchestrator
         [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "session")] HttpRequestData req,
         [DurableClient] DurableTaskClient client)
     {
-        using var reader = new StreamReader(req.Body);
-        string body = await reader.ReadToEndAsync();
-        SessionStartRequest? startRequest = JsonSerializer.Deserialize<SessionStartRequest>(body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-        
-        if (startRequest == null)
+        try { 
+            // Read the request body
+            string body;
+            using (var reader = new StreamReader(req.Body))
+            {
+                body = await reader.ReadToEndAsync();
+            }
+            
+            // Check if body is empty
+            if (string.IsNullOrWhiteSpace(body))
+            {
+                _logger.LogWarning("SessionOrchestrator_Start: Request body is empty");
+                var badRequest = req.CreateResponse(HttpStatusCode.BadRequest);
+                await badRequest.WriteStringAsync(JsonSerializer.Serialize(new { error = "Request body is empty. Expected JSON with formCode and version." }));
+                return badRequest;
+            }
+            
+            SessionStartRequest? startRequest = null;
+            try
+            {
+                startRequest = JsonSerializer.Deserialize<SessionStartRequest>(body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            }
+            catch (JsonException jsonEx)
+            {
+                _logger.LogError(jsonEx, "SessionOrchestrator_Start: Failed to deserialize JSON. Body: {Body}", body);
+                var badRequest = req.CreateResponse(HttpStatusCode.BadRequest);
+                var errorMsg = new { error = "Invalid JSON format", message = jsonEx.Message, receivedBody = body };
+                await badRequest.WriteStringAsync(JsonSerializer.Serialize(errorMsg));
+                return badRequest;
+            }
+            
+            if (startRequest == null)
+            {
+                _logger.LogWarning("SessionOrchestrator_Start: Deserialized request is null. Body: {Body}", body);
+                var badRequest = req.CreateResponse(HttpStatusCode.BadRequest);
+                await badRequest.WriteStringAsync(JsonSerializer.Serialize(new { error = "Invalid request body. Could not deserialize JSON." }));
+                return badRequest;
+            }
+
+            
+
+            string instanceId = await client.ScheduleNewOrchestrationInstanceAsync(
+                OrchestratorName,
+                new SessionState 
+                { 
+                    FormCode = startRequest.FormCode, 
+                    Version = startRequest.Version, 
+                    History = new List<string>(),
+                    CompletedFieldValues = new Dictionary<string, FieldValue>()
+                });
+            HttpResponseData response = req.CreateResponse(HttpStatusCode.Accepted);
+            response.Headers.Add("Content-Type", "application/json");
+            var responseObj = new { instanceId = instanceId, formCode = startRequest.FormCode, version = startRequest.Version };
+            await response.WriteStringAsync(JsonSerializer.Serialize(responseObj));
+            return response;
+        }
+        catch (Exception ex)
         {
-            var badRequest = req.CreateResponse(HttpStatusCode.BadRequest);
-            await badRequest.WriteStringAsync("Invalid request body");
-            return badRequest;
+            _logger.LogError(ex, "SessionOrchestrator_Start: Unhandled exception during session initialization");
+            var errorResponse = req.CreateResponse(HttpStatusCode.InternalServerError);
+            var errorObj = new { error = "Durable Task Client initialization error", message = ex.Message, type = ex.GetType().Name, innerMessage = ex.InnerException?.Message };
+            await errorResponse.WriteStringAsync(JsonSerializer.Serialize(errorObj));
+            return errorResponse;
         }
 
-        
-
-        string instanceId = await client.ScheduleNewOrchestrationInstanceAsync(
-            OrchestratorName,
-            new SessionState 
-            { 
-                FormCode = startRequest.FormCode, 
-                Version = startRequest.Version, 
-                History = new List<string>(),
-                CompletedFieldValues = new Dictionary<string, FieldValue>()
-            });
-        HttpResponseData response = req.CreateResponse(HttpStatusCode.Accepted);
-        response.Headers.Add("Content-Type", "application/json");
-        await response.WriteStringAsync("{\"instanceId\":\"" + instanceId + "\",\"formCode\":\"" + startRequest.FormCode + "\",\"version\":\"" + startRequest.Version + "\"}");
-        return response;
     }
 
     [Function("SessionOrchestrator_Send")]
@@ -138,69 +202,179 @@ public class SessionOrchestrator
         string instanceId,
         [DurableClient] DurableTaskClient client)
     {
-        using var reader = new StreamReader(req.Body);
-        string body = await reader.ReadToEndAsync();
-        
-        // Get current state before processing
-        SessionState? currentState = await GetCurrentStateAsync(client, instanceId);
-        if (currentState.FormCode == null) {
-            var errorResponse = req.CreateResponse(HttpStatusCode.NotFound  );
-            await errorResponse.WriteStringAsync("{\"error\": \"No form specified for this request.\"}");
-            return errorResponse;
-        }        
-        var (form, error) = await LoadFormAsync(req, currentState);
-        if (error != null || form == null)
+        try
         {
-            var errorResponse = req.CreateResponse(HttpStatusCode.NotFound  );
-            await errorResponse.WriteStringAsync("{\"error\": \"Form Instance not found or no status available\"}");
-            return errorResponse;
-        }
-        // Extract field values from the message using AI
-        var newFieldValues = new List<FormFieldValue>();
-        newFieldValues = await _fieldCompletionAgent.ExtractFieldValuesAsync(
-                body, 
-                form, 
-                currentState.CompletedFieldValues);
-        
-        var validationResult = new ValidationResult();
+            using var reader = new StreamReader(req.Body);
+            string body = await reader.ReadToEndAsync();
+            
+            // Get current state before processing
+            SessionState? currentState = await GetCurrentStateAsync(client, instanceId);
+            if (currentState.FormCode == null) {
+                _logger.LogWarning("SessionOrchestrator_Send: No form specified for instance {InstanceId}", instanceId);
+                var errorResponse = req.CreateResponse(HttpStatusCode.NotFound);
+                await errorResponse.WriteStringAsync(JsonSerializer.Serialize(new { error = "No form specified for this request." }));
+                return errorResponse;
+            }        
+            var (form, error, fieldIds) = await LoadFormAsync(req, currentState);
+            if (error != null || form == null)
+            {
+                _logger.LogWarning("SessionOrchestrator_Send: Form not found for instance {InstanceId}. FormCode: {FormCode}", instanceId, currentState.FormCode);
+                var errorResponse = req.CreateResponse(HttpStatusCode.NotFound);
+                await errorResponse.WriteStringAsync(JsonSerializer.Serialize(new { error = "Form Instance not found or no status available" }));
+                return errorResponse;
+            }
 
-        if (newFieldValues != null && newFieldValues.Count > 0)
-        {
+            // Try up to 3 times to extract field values with 200ms delay between attempts
+            var newFieldValues = new List<FormFieldValue>();
+            if  (body.Trim().Length > 0) {
+                int maxAttempts = 3;
+                for (int attempt = 0; attempt < maxAttempts; attempt++)
+                {
+                    if (attempt > 0)
+                    {
+                        _logger.LogInformation("Retrying field extraction, attempt {Attempt}", attempt + 1);
+                        // Delay 200ms between attempts
+                        await Task.Delay(200);
+                    }
+                    
+                    var extractedFields = await _fieldCompletionAgent.ExtractFieldValuesAsync(
+                        body, 
+                        form, 
+                        currentState.CompletedFieldValues);
+                    
+                    if (extractedFields != null && extractedFields.Count > 0)
+                    {
+                        newFieldValues = extractedFields;
+                        _logger.LogInformation("Field extraction succeeded on attempt {Attempt}", attempt + 1);
+                        break;
+                    }
+                    
+                    _logger.LogInformation("Field extraction attempt {Attempt} returned no fields", attempt + 1);
+                }
+            }
+            //If new values are present, update current state
             UpdateFieldValues(currentState, newFieldValues);
             
-            validationResult = await _fieldValidationAgent.ValidateFieldValuesAsync(
-            body,
-            form,
-            currentState.CompletedFieldValues,
-            newFieldValues);
-        }
-                       // Validate the extracted field values
-       
+            //If there are new fields to validate:
+            var validationResult = new ValidationResult();            
+            if (newFieldValues != null && newFieldValues.Count > 0)
+            {
+                // Only validate if new field values were discovered
+                validationResult = await _fieldValidationAgent.ValidateFieldValuesAsync(
+                body,
+                form,
+                currentState.CompletedFieldValues,
+                newFieldValues);
+            }
+
+            // Generate conversational response
+            var conversationResponse = await _conversationAgent.GenerateResponseAsync(
+                currentState.History ?? new List<string>(),
+                form,
+                currentState.CompletedFieldValues,
+                newFieldValues,
+                validationResult,
+                focusFieldId: null // TODO: Add focusFieldId parameter to the Send function if needed
+            );
+
+            // If conversation agent drafted a field, add it to newFieldValues
+            if (conversationResponse.DraftedField != null && !string.IsNullOrEmpty(conversationResponse.DraftedField.FieldName))
+            {
+                var draftedFieldValue = new FormFieldValue
+                {
+                    FieldName = conversationResponse.DraftedField.FieldName,
+                    Value = JsonSerializer.SerializeToElement(conversationResponse.DraftedField.Value),
+                    Drafted = true,
+                    Note = "AI-drafted content"
+                };
+                //Add the drafted value to the new field values list
+                newFieldValues.Add(draftedFieldValue);
+                
+                // Update the current state with the drafted field
+                UpdateFieldValues(currentState, new List<FormFieldValue> { draftedFieldValue });
+            }
+
+
+            string fieldFocusInfo = conversationResponse.FieldFocus != null ? $" [Next focus field: {conversationResponse.FieldFocus}]" : "";
+            var messageList = new List<string>
+            {
+                $"user: {body}",
+                $"assistant: {conversationResponse.FinalThoughts}{fieldFocusInfo}"
+            };
+
+            // Add form_input message if any fields were updated
+            if (newFieldValues != null && newFieldValues.Count > 0)
+            {
+                var fieldNames = newFieldValues.Select(f => f.FieldName).ToArray();
+                messageList.Add($"form_input: [{string.Join(", ", fieldNames)}]");
+            }
+
+            // Create message event data that includes both message and field completions
+            var messageEventData = new MessageEventData
+            {
+                Messages = messageList,
+                FieldCompletions = currentState.CompletedFieldValues
+            };
+            
+            // Raise the message event to the orchestrator with all data
+            await client.RaiseEventAsync(instanceId, EventNames[0], JsonSerializer.Serialize(messageEventData));
+            
+            HttpResponseData response = req.CreateResponse(HttpStatusCode.Accepted);
+            response.Headers.Add("Content-Type", "application/json");
+            
+            // Build response object with conditional validation fields
+            var responseDict = new Dictionary<string, object>
+            {
+                ["status"] = newFieldValues.Count > 0 ? "fields_updated" : "ok"
+            };
+            
+            responseDict["newFieldValues"] = newFieldValues;       
+            // Add errors at root level if present
+            if (validationResult.Errors != null && validationResult.Errors.Count > 0)
+            {
+                responseDict["errors"] = validationResult.Errors;
+            }        
+            // Add warnings at root level if present
+            if (validationResult.Warnings != null && validationResult.Warnings.Count > 0)
+            {
+                responseDict["warnings"] = validationResult.Warnings;
+            }
+            
+            // Add conversation response components
+            if (!string.IsNullOrEmpty(conversationResponse.QuestionResponse))
+            {
+                responseDict["questionResponse"] = conversationResponse.QuestionResponse;
+            }
+            //Prevents acknowledgment if a draft was made
+            if (!string.IsNullOrEmpty(conversationResponse.AcknowledgeInputs))
+            {
+                responseDict["acknowledgeInputs"] = conversationResponse.AcknowledgeInputs;
+            }
+            if (!string.IsNullOrEmpty(conversationResponse.ValidationConcerns))
+            {
+                responseDict["validationConcerns"] = conversationResponse.ValidationConcerns;
+            }
+            if (!string.IsNullOrEmpty(conversationResponse.FinalThoughts))
+            {
+                responseDict["finalThoughts"] = conversationResponse.FinalThoughts;
+            }
+            if (!string.IsNullOrEmpty(conversationResponse.FieldFocus))
+            {
+                responseDict["fieldFocus"] = conversationResponse.FieldFocus;
+            }
             
 
-        // Create message event data that includes both message and field completions
-        var messageEventData = new MessageEventData
+            await response.WriteStringAsync(JsonSerializer.Serialize(responseDict));
+            return response;
+        }
+        catch (Exception ex)
         {
-            Message = body,
-            FieldCompletions = currentState.CompletedFieldValues
-        };
-        
-        // Raise the message event to the orchestrator with all data
-        await client.RaiseEventAsync(instanceId, EventNames[0], JsonSerializer.Serialize(messageEventData));
-        
-        HttpResponseData response = req.CreateResponse(HttpStatusCode.Accepted);
-        response.Headers.Add("Content-Type", "application/json");
-        
-        var responseObject = new
-        {
-            newFieldValues = newFieldValues.Count > 0 ? newFieldValues : null,
-            validation = validationResult,
-            status = newFieldValues.Count > 0 ? "fields_updated" : "ok",
-            message = newFieldValues.Count > 0 ? null : "No new fields acquired."
-        };
-        
-        await response.WriteStringAsync(JsonSerializer.Serialize(responseObject));
-        return response;
+            _logger.LogError(ex, "SessionOrchestrator_Send: Unhandled exception for instance {InstanceId}", instanceId);
+            var errorResponse = req.CreateResponse(HttpStatusCode.InternalServerError);
+            var errorObj = new { error = "Failed to process message", message = ex.Message, type = ex.GetType().Name, instanceId = instanceId, innerMessage = ex.InnerException?.Message };
+            await errorResponse.WriteStringAsync(JsonSerializer.Serialize(errorObj));
+            return errorResponse;
+        }
     }
 
     [Function("SessionOrchestrator_GetFields")]
@@ -267,7 +441,7 @@ public class SessionOrchestrator
         }
         
         // Load the form to validate field IDs
-        var (form, error) = await LoadFormAsync(req, currentState);
+        var (form, error, fieldIds) = await LoadFormAsync(req, currentState);
         if (error != null || form == null)
         {
             var errorResponse = req.CreateResponse(HttpStatusCode.NotFound);
@@ -303,10 +477,18 @@ public class SessionOrchestrator
             currentState.CompletedFieldValues,
             fieldUpdateRequest.NewFieldValues);
         
-        // Create form action event data
+        // Create message list with form_input notification
+        var fieldNames = fieldUpdateRequest.NewFieldValues.Select(f => f.FieldName).ToArray();
+        var messageList = new List<string>
+        {
+            $"form_input: [{string.Join(", ", fieldNames)}]"
+        };
+        
+        // Create form action event data with field updates and messages
         var formActionData = new FormActionEventData
         {
-            NewFieldValues = fieldUpdateRequest.NewFieldValues
+            NewFieldValues = fieldUpdateRequest.NewFieldValues,
+            Messages = messageList
         };
         
         // Raise the form_action event to the orchestrator
@@ -342,13 +524,14 @@ public class SessionOrchestrator
 
     private class MessageEventData
     {
-        public string? Message { get; set; }
+        public List<string>? Messages { get; set; }
         public Dictionary<string, FieldValue>? FieldCompletions { get; set; }
     }
 
     private class FormActionEventData
     {
         public List<FormFieldValue>? NewFieldValues { get; set; }
+        public List<string>? Messages { get; set; }
     }
 
     private class FieldUpdateRequest
@@ -385,9 +568,10 @@ public class SessionOrchestrator
         }
     }
 
-    private async Task<(Form? form, HttpResponseData? errorResponse)> LoadFormAsync(HttpRequestData req, SessionState? currentState)
+    private async Task<(Form? form, HttpResponseData? errorResponse, String fieldIds)> LoadFormAsync(HttpRequestData req, SessionState? currentState)
     {
         var form = new Form();
+        String fieldIds="";
         
         if (currentState != null && !string.IsNullOrEmpty(currentState.FormCode))
         {
@@ -399,22 +583,23 @@ public class SessionOrchestrator
             {
                 string formJson = await _blobStorageService.ReadFileAsync(currentState.FormCode, fileName, FormsContainer);
                 form = JsonSerializer.Deserialize<Form>(formJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                fieldIds = string.Join(",", form.Body.Select(f => f.Id));
+
             }
             catch (FileNotFoundException ex)
             {
                 var notFound = req.CreateResponse(HttpStatusCode.NotFound);
                 await notFound.WriteStringAsync($"Form not found: {currentState.FormCode}/{fileName} - {ex.Message}");
-                return (null, notFound);
+                return (null, notFound, null);
             }
             catch (Exception ex)
             {
                 var errorResponse = req.CreateResponse(HttpStatusCode.InternalServerError);
                 await errorResponse.WriteStringAsync($"Error loading form: {ex.Message} | Stack: {ex.StackTrace} | Inner: {ex.InnerException?.Message}");
-                return (null, errorResponse);
+                return (null, errorResponse, null);
             }
-        }
-        
-        return (form, null);
+        }        
+        return (form, null, fieldIds);
     }
 
     private async Task<SessionState?> GetCurrentStateAsync(DurableTaskClient client, string instanceId)

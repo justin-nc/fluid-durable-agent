@@ -15,9 +15,10 @@ using fluid_durable_agent.Tools;
 using fluid_durable_agent.Services;
 
 var endpoint = Environment.GetEnvironmentVariable("AZURE_OPENAI_ENDPOINT") ?? throw new InvalidOperationException("AZURE_OPENAI_ENDPOINT is required");
-var deploymentName = Environment.GetEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT") ?? "gpt-4o-mini";
+var deploymentName = Environment.GetEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT") ?? "gpt-5-mini";
 var fieldCompletionDeployment = Environment.GetEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT_FIELDCOMPLETION") ?? "gpt-oss-120b";
 var fieldValidationDeployment = Environment.GetEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT_FIELDVALIDATION") ?? "gpt-oss-120b";
+var conversationDeployment = Environment.GetEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT_CONVERSATION") ?? deploymentName; //use default if not set
 var key = Environment.GetEnvironmentVariable("AZURE_OPENAI_KEY") ?? throw new InvalidOperationException("AZURE_OPENAI_KEY is required");
 var dtsBackend = Environment.GetEnvironmentVariable("DurableTaskBackend") ?? "http://localhost:8082";
 var taskHubName = Environment.GetEnvironmentVariable("TASKHUB_NAME") ?? "default";
@@ -74,6 +75,17 @@ builder.Services.AddSingleton<fluid_durable_agent.Agents.Agent_FieldValidation>(
         .AsIChatClient();
     return new fluid_durable_agent.Agents.Agent_FieldValidation(chatClient);
 });
+
+// Register Agent_Conversation with its own client
+builder.Services.AddSingleton<fluid_durable_agent.Agents.Agent_Conversation>(sp =>
+{
+    var chatClient = new AzureOpenAIClient(new Uri(endpoint), new AzureKeyCredential(key))
+        .GetChatClient(conversationDeployment)
+        .AsIChatClient();
+    return new fluid_durable_agent.Agents.Agent_Conversation(chatClient);
+});
+
+
 
 // Configure Durable Task Client to use DTS backend
 builder.Services.AddDurableTaskClient(clientBuilder =>

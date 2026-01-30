@@ -19,6 +19,26 @@ I'm john doe; j.doe@nc.gov and the project owner is Joe Smith; joe.smith@nc.gov
 This procurement is for a new software platform to host virtual machines.  We don't currently have 
 such a system and our customers desperately need it.  The budget is around $250,000 and we need it by the end of Q3 2026
 
+###
+POST http://localhost:7071/api/session/{{instanceId}}/message
+
+NC Department of Information Technology.
+
+###
+POST http://localhost:7071/api/session/{{instanceId}}/message
+
+
+
+###
+POST http://localhost:7071/api/session/{{instanceId}}/fields
+
+{ "newFieldValues": [{ "fieldName": "agencyName", "value": "NC Department of Information Technology"}]}
+####
+
+
+POST http://localhost:7071/api/session/{{instanceId}}/message
+
+[inputFocus: problemStatement]Can you help me create this?
 
 ###
 POST http://localhost:7071/api/session/{{instanceId}}/message
@@ -33,7 +53,7 @@ The owner is jane smith.
 ###
 POST http://localhost:7071/api/session/{{instanceId}}/fields
 
-{ "newFieldValues": [{ "fieldName": "ProjectOwnerEmail", "value": "jane.smith@nc.gov"}]}
+{ "newFieldValues": [{ "fieldName": "aribaWSID", "value": "WS1231231230"}]}
 
 ####
 GET http://localhost:7071/api/session/{{instanceId}}/fields

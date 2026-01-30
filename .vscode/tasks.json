@@ -40,6 +40,20 @@
                 "/consoleloggerparameters:NoSummary"
             ],
             "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "publish (functions)",
+            "command": "dotnet",
+            "type": "process",
+            "args": [
+                "publish",
+                "${workspaceFolder}/fluid-durable-agent.csproj",
+                "/property:GenerateFullPaths=true",
+                "/consoleloggerparameters:NoSummary",
+                "--output",
+                "${workspaceFolder}/bin/output"
+            ],
+            "problemMatcher": "$msCompile"
         }
     ]
 }

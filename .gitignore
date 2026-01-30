@@ -3,6 +3,10 @@
 
 # Azure Functions localsettings file
 local.settings.json
+local.settings.dev.json
+
+# Test files with secrets
+tests/*_azure_*.http
 
 # User-specific files
 *.suo

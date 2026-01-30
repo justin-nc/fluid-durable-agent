@@ -7,4 +7,11 @@ public class ConversationResponse
     public string? ValidationConcerns { get; set; }
     public string? FinalThoughts { get; set; }
     public string? FieldFocus { get; set; }
+    public DraftedField? DraftedField { get; set; }
+}
+
+public class DraftedField
+{
+    public string? FieldName { get; set; }
+    public string? Value { get; set; }
 }
