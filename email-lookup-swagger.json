@@ -1,0 +1,234 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Employee Email Lookup API",
+    "description": "API for looking up employee details by email address. This service retrieves employee information including agency, department, name, and contact details.",
+    "version": "1.0.0",
+    "contact": {
+      "name": "NC Government IT Services"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://prod-07.usgovtexas.logic.azure.us/workflows/d12005d7dc5f40ea93790f33959fcda8/triggers/manual/paths/invoke",
+      "description": "Production Azure Logic Apps endpoint"
+    }
+  ],
+  "paths": {
+    "/": {
+      "post": {
+        "summary": "Lookup employee by email",
+        "description": "Retrieves employee details based on their email address. Returns information including agency, department, display name, and principal name.",
+        "operationId": "lookupEmployee",
+        "tags": ["Employee Lookup"],
+        "parameters": [
+          {
+            "name": "api-version",
+            "in": "query",
+            "required": true,
+            "description": "Azure Logic Apps API version",
+            "schema": {
+              "type": "string",
+              "default": "2016-06-01"
+            }
+          },
+          {
+            "name": "sp",
+            "in": "query",
+            "required": true,
+            "description": "Shared access signature path",
+            "schema": {
+              "type": "string",
+              "default": "/triggers/manual/run"
+            }
+          },
+          {
+            "name": "sv",
+            "in": "query",
+            "required": true,
+            "description": "Shared access signature version",
+            "schema": {
+              "type": "string",
+              "default": "1.0"
+            }
+          },
+          {
+            "name": "sig",
+            "in": "query",
+            "required": true,
+            "description": "Shared access signature for authentication",
+            "schema": {
+              "type": "string",
+              "default": "uQFTw4MDrESDQftCaq4bgWBGKdEqG1xQBNi7bEXsjYw"
+            }
+          },
+          {
+            "name": "email",
+            "in": "query",
+            "required": true,
+            "description": "Email address of the employee to lookup",
+            "schema": {
+              "type": "string",
+              "format": "email"
+            },
+            "example": "justin.vargas@nc.gov"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Employee details retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmployeeResponse"
+                },
+                "examples": {
+                  "successful": {
+                    "summary": "Successful employee lookup",
+                    "value": {
+                      "Agency": "Office of Information Technology Services",
+                      "Department": "Chief Deputy SCIO",
+                      "DisplayName": "Vargas, Justin J",
+                      "Email": "justin.vargas@nc.gov",
+                      "FirstName": "Justin",
+                      "LastName": "Vargas",
+                      "PrincipalName": "Justin.Vargas@nc.gov",
+                      "Error": ""
+                    }
+                  },
+                  "notFound": {
+                    "summary": "Employee not found",
+                    "value": {
+                      "Agency": "",
+                      "Department": "",
+                      "DisplayName": "",
+                      "Email": "",
+                      "FirstName": "",
+                      "LastName": "",
+                      "PrincipalName": "",
+                      "Error": "Employee not found"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request - invalid email parameter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized - invalid or missing authentication parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "EmployeeResponse": {
+        "type": "object",
+        "properties": {
+          "Agency": {
+            "type": "string",
+            "description": "The agency or organization the employee belongs to",
+            "example": "Office of Information Technology Services"
+          },
+          "Department": {
+            "type": "string",
+            "description": "The department within the agency",
+            "example": "Chief Deputy SCIO"
+          },
+          "DisplayName": {
+            "type": "string",
+            "description": "The employee's display name (typically Last, First Middle)",
+            "example": "Vargas, Justin J"
+          },
+          "Email": {
+            "type": "string",
+            "format": "email",
+            "description": "The employee's email address",
+            "example": "justin.vargas@nc.gov"
+          },
+          "FirstName": {
+            "type": "string",
+            "description": "The employee's first name",
+            "example": "Justin"
+          },
+          "LastName": {
+            "type": "string",
+            "description": "The employee's last name",
+            "example": "Vargas"
+          },
+          "PrincipalName": {
+            "type": "string",
+            "description": "The employee's principal name (typically for authentication)",
+            "example": "Justin.Vargas@nc.gov"
+          },
+          "Error": {
+            "type": "string",
+            "description": "Error message if the lookup failed, empty string if successful",
+            "example": ""
+          }
+        },
+        "required": [
+          "Agency",
+          "Department",
+          "DisplayName",
+          "Email",
+          "FirstName",
+          "LastName",
+          "PrincipalName",
+          "Error"
+        ]
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Error message",
+            "example": "Invalid email parameter"
+          },
+          "message": {
+            "type": "string",
+            "description": "Detailed error message"
+          },
+          "statusCode": {
+            "type": "integer",
+            "description": "HTTP status code"
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Employee Lookup",
+      "description": "Operations for looking up employee information"
+    }
+  ]
+}

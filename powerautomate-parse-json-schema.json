@@ -1,0 +1,80 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string"
+    },
+    "newFieldValues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "fieldName": {
+            "type": ["string", "null"]
+          },
+          "value": {},
+          "note": {
+            "type": ["string", "null"]
+          },
+          "inferred": {
+            "type": ["boolean", "null"]
+          },
+          "drafted": {
+            "type": ["boolean", "null"]
+          }
+        }
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "fieldId": {
+            "type": "string"
+          },
+          "concern": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "fieldId",
+          "concern"
+        ]
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "fieldId": {
+            "type": "string"
+          },
+          "concern": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "fieldId",
+          "concern"
+        ]
+      }
+    },
+    "questionResponse": {
+      "type": ["string", "null"]
+    },
+    "acknowledgeInputs": {
+      "type": ["string", "null"]
+    },
+    "validationConcerns": {
+      "type": ["string", "null"]
+    },
+    "finalThoughts": {
+      "type": ["string", "null"]
+    },
+    "fieldFocus": {
+      "type": ["string", "null"]
+    }
+  }
+}

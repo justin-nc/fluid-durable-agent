@@ -7,4 +7,6 @@ public class SessionState
     public List<string> History { get; set; } = new List<string>();
     public string NewMessage { get; set; } = string.Empty;
     public Dictionary<string, FieldValue> CompletedFieldValues { get; set; } = new Dictionary<string, FieldValue>();
+    public string? ClientAccessToken { get; set; }
+    public DateTime? TokenExpiration { get; set; }
 }

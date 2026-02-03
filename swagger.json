@@ -1,0 +1,777 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Fluid Durable Agent - Session Orchestrator API",
+    "description": "API for managing conversational form sessions using Azure Durable Functions.\n\nThis API allows you to:\n- Start new form sessions\n- Send messages to active sessions\n- Retrieve field values from sessions\n- Update field values directly\n\nSessions are backed by Azure Durable Functions orchestrators that maintain state and conversation history.",
+    "version": "1.0.0",
+    "contact": {
+      "name": "Fluid Durable Agent"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:7071/api",
+      "description": "Local development server"
+    },
+    {
+      "url": "https://dit-fluid-dev-scus-node-e5deeefbb7hga0bv.southcentralus-01.azurewebsites.net/api",
+      "description": "Production server (update with your Azure Function App URL)"
+    }
+  ],
+  "paths": {
+    "/session": {
+      "post": {
+        "summary": "Start a new session",
+        "description": "Creates a new durable orchestrator instance for a form session.\nReturns an instance ID that should be used in subsequent API calls.",
+        "operationId": "startSession",
+        "tags": ["Session Management"],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ApiKeyParam"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionStartRequest"
+              },
+              "examples": {
+                "basic": {
+                  "summary": "Start session with latest form version",
+                  "value": {
+                    "formCode": "contact-form",
+                    "version": ""
+                  }
+                },
+                "versioned": {
+                  "summary": "Start session with specific form version",
+                  "value": {
+                    "formCode": "contact-form",
+                    "version": "v1.2.0"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Session started successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionStartResponse"
+                },
+                "example": {
+                  "instanceId": "abc123-session-456def",
+                  "formCode": "contact-form",
+                  "version": "v1.2.0"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request - invalid or missing JSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "emptyBody": {
+                    "summary": "Empty request body",
+                    "value": {
+                      "error": "Request body is empty. Expected JSON with formCode and version."
+                    }
+                  },
+                  "invalidJson": {
+                    "summary": "Invalid JSON format",
+                    "value": {
+                      "error": "Invalid JSON format",
+                      "message": "Unexpected character at position 5",
+                      "receivedBody": "{form:}"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session/{instanceId}/message": {
+      "post": {
+        "summary": "Send a message to a session",
+        "description": "Sends a user message to an active session. The system will:\n1. Extract field values from the message\n2. Validate extracted values\n3. Generate a conversational response\n4. Update the session state\n\nMay also return AI-drafted field content as part of the response.",
+        "operationId": "sendMessage",
+        "tags": ["Session Interaction"],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ApiKeyParam"
+          },
+          {
+            "name": "instanceId",
+            "in": "path",
+            "required": true,
+            "description": "The instance ID returned from the session start endpoint",
+            "schema": {
+              "type": "string"
+            },
+            "example": "abc123-session-456def"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "Plain text message from the user",
+          "content": {
+            "text/plain": {
+              "schema": {
+                "type": "string"
+              },
+              "example": "My name is John Doe and my email is john@example.com"
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Message processed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendMessageResponse"
+                },
+                "examples": {
+                  "fieldsUpdated": {
+                    "summary": "Message resulted in field updates",
+                    "value": {
+                      "status": "fields_updated",
+                      "newFieldValues": [
+                        {
+                          "fieldName": "fullName",
+                          "value": "John Doe",
+                          "note": null,
+                          "inferred": false,
+                          "drafted": false
+                        },
+                        {
+                          "fieldName": "email",
+                          "value": "john@example.com",
+                          "note": null,
+                          "inferred": false,
+                          "drafted": false
+                        }
+                      ],
+                      "acknowledgeInputs": "I've captured your name as John Doe and email as john@example.com.",
+                      "finalThoughts": "What is your phone number?",
+                      "fieldFocus": "phoneNumber"
+                    }
+                  },
+                  "withValidationError": {
+                    "summary": "Message with validation errors",
+                    "value": {
+                      "status": "fields_updated",
+                      "newFieldValues": [
+                        {
+                          "fieldName": "email",
+                          "value": "invalid-email",
+                          "note": null,
+                          "inferred": false,
+                          "drafted": false
+                        }
+                      ],
+                      "errors": [
+                        {
+                          "fieldId": "email",
+                          "concern": "Email format is invalid. Please provide a valid email address."
+                        }
+                      ],
+                      "validationConcerns": "The email address you provided doesn't appear to be valid.",
+                      "finalThoughts": "Could you please provide a valid email address?"
+                    }
+                  },
+                  "noFieldsExtracted": {
+                    "summary": "Conversational response without field updates",
+                    "value": {
+                      "status": "ok",
+                      "newFieldValues": [],
+                      "questionResponse": "I can help you with that form. What information would you like to provide?",
+                      "finalThoughts": "Let's start with your full name.",
+                      "fieldFocus": "fullName"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found or form not specified",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session/{instanceId}/fields": {
+      "get": {
+        "summary": "Get current field values",
+        "description": "Retrieves all completed field values for a session.\nReturns the current state of the form fields.",
+        "operationId": "getFields",
+        "tags": ["Field Management"],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ApiKeyParam"
+          },
+          {
+            "name": "instanceId",
+            "in": "path",
+            "required": true,
+            "description": "The instance ID of the session",
+            "schema": {
+              "type": "string"
+            },
+            "example": "abc123-session-456def"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Field values retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetFieldsResponse"
+                },
+                "example": {
+                  "instanceId": "abc123-session-456def",
+                  "formCode": "contact-form",
+                  "version": "v1.2.0",
+                  "completedFieldValues": {
+                    "fullName": {
+                      "value": "John Doe",
+                      "note": null
+                    },
+                    "email": {
+                      "value": "john@example.com",
+                      "note": " (Inferred)"
+                    },
+                    "phoneNumber": {
+                      "value": "555-1234",
+                      "note": " (Drafted)"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": "Instance not found"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Update field values directly",
+        "description": "Directly updates field values in a session without conversational processing.\nUseful for programmatic form updates or UI-driven field changes.\n\nField values are validated before being accepted.",
+        "operationId": "updateFields",
+        "tags": ["Field Management"],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ApiKeyParam"
+          },
+          {
+            "name": "instanceId",
+            "in": "path",
+            "required": true,
+            "description": "The instance ID of the session",
+            "schema": {
+              "type": "string"
+            },
+            "example": "abc123-session-456def"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FieldUpdateRequest"
+              },
+              "example": {
+                "newFieldValues": [
+                  {
+                    "fieldName": "fullName",
+                    "value": "Jane Smith",
+                    "note": "Updated by user"
+                  },
+                  {
+                    "fieldName": "phoneNumber",
+                    "value": "555-9876"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Field updates accepted and queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateFieldsResponse"
+                },
+                "examples": {
+                  "successful": {
+                    "summary": "Successful update",
+                    "value": {
+                      "status": "accepted",
+                      "message": "Field updates queued for processing",
+                      "updatedFields": 2
+                    }
+                  },
+                  "withWarnings": {
+                    "summary": "Update with validation warnings",
+                    "value": {
+                      "status": "accepted",
+                      "message": "Field updates queued for processing",
+                      "updatedFields": 1,
+                      "warnings": [
+                        {
+                          "fieldId": "phoneNumber",
+                          "concern": "Phone number format should include area code"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request - invalid or missing field values",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "emptyFieldValues": {
+                    "summary": "Empty or missing newFieldValues",
+                    "value": {
+                      "error": "NewFieldValues array is required and cannot be empty"
+                    }
+                  },
+                  "invalidFieldIds": {
+                    "summary": "Invalid field IDs provided",
+                    "value": {
+                      "error": "Invalid field IDs provided",
+                      "invalidFields": ["unknownField", "anotherInvalidField"]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session or form not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "ApiKeyParam": {
+        "name": "code",
+        "in": "query",
+        "required": false,
+        "description": "Azure Functions API key for authentication. Required in production environments.\nNot required for local development with AuthorizationLevel.Anonymous.",
+        "schema": {
+          "type": "string"
+        },
+        "example": "your-api-key-here"
+      }
+    },
+    "schemas": {
+      "SessionStartRequest": {
+        "type": "object",
+        "required": ["formCode"],
+        "properties": {
+          "formCode": {
+            "type": "string",
+            "description": "The unique code identifying the form to use for this session",
+            "example": "contact-form"
+          },
+          "version": {
+            "type": "string",
+            "nullable": true,
+            "description": "Optional form version. If not provided or empty, the latest version will be used.",
+            "example": "v1.2.0"
+          }
+        }
+      },
+      "SessionStartResponse": {
+        "type": "object",
+        "properties": {
+          "instanceId": {
+            "type": "string",
+            "description": "The unique instance ID for this session",
+            "example": "abc123-session-456def"
+          },
+          "formCode": {
+            "type": "string",
+            "description": "The form code for this session",
+            "example": "contact-form"
+          },
+          "version": {
+            "type": "string",
+            "description": "The form version being used",
+            "example": "v1.2.0"
+          }
+        }
+      },
+      "SendMessageResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["ok", "fields_updated"],
+            "description": "Status of the message processing:\n- ok: Message processed without field updates\n- fields_updated: Message resulted in field value updates"
+          },
+          "newFieldValues": {
+            "type": "array",
+            "description": "Array of newly extracted or updated field values",
+            "items": {
+              "$ref": "#/components/schemas/FormFieldValue"
+            }
+          },
+          "errors": {
+            "type": "array",
+            "description": "Validation errors for extracted field values",
+            "items": {
+              "$ref": "#/components/schemas/FieldConcern"
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "description": "Validation warnings for extracted field values",
+            "items": {
+              "$ref": "#/components/schemas/FieldConcern"
+            }
+          },
+          "questionResponse": {
+            "type": "string",
+            "description": "AI response to user questions",
+            "example": "I can help you with that. Let me know your contact details."
+          },
+          "acknowledgeInputs": {
+            "type": "string",
+            "description": "AI acknowledgment of captured inputs",
+            "example": "I've captured your name as John Doe."
+          },
+          "validationConcerns": {
+            "type": "string",
+            "description": "AI explanation of validation issues",
+            "example": "The email address format appears to be incorrect."
+          },
+          "finalThoughts": {
+            "type": "string",
+            "description": "AI's final conversational response",
+            "example": "What is your phone number?"
+          },
+          "fieldFocus": {
+            "type": "string",
+            "description": "The field ID that should receive focus next",
+            "example": "phoneNumber"
+          }
+        }
+      },
+      "GetFieldsResponse": {
+        "type": "object",
+        "properties": {
+          "instanceId": {
+            "type": "string",
+            "description": "The session instance ID",
+            "example": "abc123-session-456def"
+          },
+          "formCode": {
+            "type": "string",
+            "description": "The form code for this session",
+            "example": "contact-form"
+          },
+          "version": {
+            "type": "string",
+            "nullable": true,
+            "description": "The form version being used",
+            "example": "v1.2.0"
+          },
+          "completedFieldValues": {
+            "type": "object",
+            "description": "Map of field IDs to their current values",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/FieldValue"
+            },
+            "example": {
+              "fullName": {
+                "value": "John Doe",
+                "note": null
+              },
+              "email": {
+                "value": "john@example.com",
+                "note": " (Inferred)"
+              }
+            }
+          }
+        }
+      },
+      "FieldUpdateRequest": {
+        "type": "object",
+        "required": ["newFieldValues"],
+        "properties": {
+          "newFieldValues": {
+            "type": "array",
+            "description": "Array of field values to update",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/FormFieldValue"
+            }
+          }
+        }
+      },
+      "UpdateFieldsResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["accepted"],
+            "description": "Status of the update request"
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable message about the update",
+            "example": "Field updates queued for processing"
+          },
+          "updatedFields": {
+            "type": "integer",
+            "description": "Number of fields queued for update",
+            "example": 2
+          },
+          "errors": {
+            "type": "array",
+            "description": "Validation errors encountered",
+            "items": {
+              "$ref": "#/components/schemas/FieldConcern"
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "description": "Validation warnings encountered",
+            "items": {
+              "$ref": "#/components/schemas/FieldConcern"
+            }
+          }
+        }
+      },
+      "FormFieldValue": {
+        "type": "object",
+        "properties": {
+          "fieldName": {
+            "type": "string",
+            "nullable": true,
+            "description": "The field identifier",
+            "example": "fullName"
+          },
+          "value": {
+            "description": "The field value. Can be any JSON type (string, number, boolean, object, array).",
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "object"
+              },
+              {
+                "type": "array"
+              }
+            ],
+            "example": "John Doe"
+          },
+          "note": {
+            "type": "string",
+            "nullable": true,
+            "description": "Optional note about this field value",
+            "example": "User provided"
+          },
+          "inferred": {
+            "type": "boolean",
+            "nullable": true,
+            "description": "Whether this value was inferred rather than explicitly stated",
+            "example": false
+          },
+          "drafted": {
+            "type": "boolean",
+            "nullable": true,
+            "description": "Whether this value was AI-drafted",
+            "example": false
+          }
+        }
+      },
+      "FieldValue": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "description": "The field value. Can be any JSON type (string, number, boolean, object, array).",
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "object"
+              },
+              {
+                "type": "array"
+              }
+            ],
+            "example": "John Doe"
+          },
+          "note": {
+            "type": "string",
+            "nullable": true,
+            "description": "Optional note about this field value (may include markers like \"(Inferred)\" or \"(Drafted)\")",
+            "example": " (Inferred)"
+          }
+        }
+      },
+      "FieldConcern": {
+        "type": "object",
+        "properties": {
+          "fieldId": {
+            "type": "string",
+            "description": "The field identifier this concern relates to",
+            "example": "email"
+          },
+          "concern": {
+            "type": "string",
+            "description": "Description of the validation error or warning",
+            "example": "Email format is invalid. Please provide a valid email address."
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Error message",
+            "example": "Instance not found"
+          },
+          "message": {
+            "type": "string",
+            "description": "Detailed error message"
+          },
+          "type": {
+            "type": "string",
+            "description": "Exception type name"
+          },
+          "instanceId": {
+            "type": "string",
+            "description": "Instance ID (if applicable)"
+          },
+          "innerMessage": {
+            "type": "string",
+            "description": "Inner exception message"
+          },
+          "receivedBody": {
+            "type": "string",
+            "description": "The received request body (for debugging invalid JSON)"
+          },
+          "invalidFields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "List of invalid field IDs"
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Session Management",
+      "description": "Operations for managing session lifecycle"
+    },
+    {
+      "name": "Session Interaction",
+      "description": "Operations for interacting with active sessions"
+    },
+    {
+      "name": "Field Management",
+      "description": "Operations for managing form field values"
+    }
+  ]
+}

@@ -1,0 +1,99 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Message Endpoint Response Schema",
+  "description": "JSON schema for PowerAutomate to parse the message endpoint response. All fields except 'status' are optional since not all attributes are sent on each call.",
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "description": "Response status: 'fields_updated' when fields were updated, 'ok' otherwise",
+      "enum": ["fields_updated", "ok"]
+    },
+    "newFieldValues": {
+      "type": "array",
+      "description": "Array of newly updated or extracted field values (optional)",
+      "items": {
+        "type": "object",
+        "properties": {
+          "fieldName": {
+            "type": ["string", "null"],
+            "description": "The name/ID of the field"
+          },
+          "value": {
+            "description": "The field value - can be string, number, boolean, array, object, or null"
+          },
+          "note": {
+            "type": ["string", "null"],
+            "description": "Optional note about the field value"
+          },
+          "inferred": {
+            "type": ["boolean", "null"],
+            "description": "Whether the value was inferred by the AI"
+          },
+          "drafted": {
+            "type": ["boolean", "null"],
+            "description": "Whether the value was AI-drafted content"
+          }
+        }
+      }
+    },
+    "errors": {
+      "type": "array",
+      "description": "Array of validation errors (optional, only present if validation errors occurred)",
+      "items": {
+        "type": "object",
+        "properties": {
+          "fieldId": {
+            "type": "string",
+            "description": "The field ID with the error"
+          },
+          "concern": {
+            "type": "string",
+            "description": "Description of the validation error"
+          }
+        },
+        "required": ["fieldId", "concern"]
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "description": "Array of validation warnings (optional, only present if validation warnings occurred)",
+      "items": {
+        "type": "object",
+        "properties": {
+          "fieldId": {
+            "type": "string",
+            "description": "The field ID with the warning"
+          },
+          "concern": {
+            "type": "string",
+            "description": "Description of the validation warning"
+          }
+        },
+        "required": ["fieldId", "concern"]
+      }
+    },
+    "questionResponse": {
+      "type": ["string", "null"],
+      "description": "Response to user's question (optional)"
+    },
+    "acknowledgeInputs": {
+      "type": ["string", "null"],
+      "description": "Acknowledgment of user inputs (optional)"
+    },
+    "validationConcerns": {
+      "type": ["string", "null"],
+      "description": "Concerns about validation (optional)"
+    },
+    "finalThoughts": {
+      "type": ["string", "null"],
+      "description": "AI's final thoughts or response to the user (optional)"
+    },
+    "fieldFocus": {
+      "type": ["string", "null"],
+      "description": "ID of the next field to focus on (optional)"
+    }
+  },
+  "required": ["status"],
+  "additionalProperties": false
+}

@@ -1,5 +1,8 @@
+using System.Diagnostics;
 using System.IO;
 using System.Net;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
@@ -15,7 +18,7 @@ namespace fluid_durable_agent.Functions;
 public class SessionOrchestrator
 {
     private const string OrchestratorName = "SessionOrchestrator";
-    private static readonly string[] EventNames = ["message", "form_action"]; // Add more event names here as needed
+    private static readonly string[] EventNames = ["message", "form_action", "token_update"]; // Add more event names here as needed
     private const string FormsContainer = "forms";
     
     private readonly BlobStorageService _blobStorageService;
@@ -105,6 +108,18 @@ public class SessionOrchestrator
                     }
 
                     logger.LogInformation("Updated {Count} field values via form_action", formActionData?.NewFieldValues?.Count ?? 0);
+                    break;
+                case "token_update":
+                    // Deserialize the token update data
+                    var tokenUpdateData = JsonSerializer.Deserialize<TokenUpdateEventData>(eventData, 
+                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                    
+                    if (tokenUpdateData != null)
+                    {
+                        state.ClientAccessToken = tokenUpdateData.Token;
+                        state.TokenExpiration = tokenUpdateData.Expiration;
+                        logger.LogInformation("Updated client access token, expires at {Expiration}", tokenUpdateData.Expiration);
+                    }
                     break;
                 default:
                     logger.LogWarning("Received unknown event type: {EventType}", eventType);
@@ -237,10 +252,13 @@ public class SessionOrchestrator
                         await Task.Delay(200);
                     }
                     
+                    var extractStopwatch = Stopwatch.StartNew();
                     var extractedFields = await _fieldCompletionAgent.ExtractFieldValuesAsync(
                         body, 
                         form, 
                         currentState.CompletedFieldValues);
+                    extractStopwatch.Stop();
+                    _logger.LogInformation("ExtractFieldValuesAsync completed in {Seconds:F2} seconds", extractStopwatch.Elapsed.TotalSeconds);
                     
                     if (extractedFields != null && extractedFields.Count > 0)
                     {
@@ -260,14 +278,18 @@ public class SessionOrchestrator
             if (newFieldValues != null && newFieldValues.Count > 0)
             {
                 // Only validate if new field values were discovered
+                var validationStopwatch = Stopwatch.StartNew();
                 validationResult = await _fieldValidationAgent.ValidateFieldValuesAsync(
                 body,
                 form,
                 currentState.CompletedFieldValues,
                 newFieldValues);
+                validationStopwatch.Stop();
+                _logger.LogInformation("ValidateFieldValuesAsync completed in {Seconds:F2} seconds", validationStopwatch.Elapsed.TotalSeconds);
             }
 
             // Generate conversational response
+            var conversationStopwatch = Stopwatch.StartNew();
             var conversationResponse = await _conversationAgent.GenerateResponseAsync(
                 currentState.History ?? new List<string>(),
                 form,
@@ -276,6 +298,8 @@ public class SessionOrchestrator
                 validationResult,
                 focusFieldId: null // TODO: Add focusFieldId parameter to the Send function if needed
             );
+            conversationStopwatch.Stop();
+            _logger.LogInformation("GenerateResponseAsync completed in {Seconds:F2} seconds", conversationStopwatch.Elapsed.TotalSeconds);
 
             // If conversation agent drafted a field, add it to newFieldValues
             if (conversationResponse.DraftedField != null && !string.IsNullOrEmpty(conversationResponse.DraftedField.FieldName))
@@ -521,6 +545,269 @@ public class SessionOrchestrator
         return response;
     }
 
+    [Function("SessionOrchestrator_GenerateClientToken")]
+    public async Task<HttpResponseData> GenerateClientToken(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "session/{instanceId}/token")] HttpRequestData req,
+        string instanceId,
+        [DurableClient] DurableTaskClient client)
+    {
+        try
+        {
+            // Get current state to validate the instance exists
+            SessionState? currentState = await GetCurrentStateAsync(client, instanceId);
+            if (currentState == null)
+            {
+                var notFound = req.CreateResponse(HttpStatusCode.NotFound);
+                notFound.Headers.Add("Content-Type", "application/json");
+                await notFound.WriteStringAsync("{\"error\": \"Instance not found\"}");
+                return notFound;
+            }
+
+            // Generate a secure token
+            var tokenBytes = new byte[32];
+            RandomNumberGenerator.Fill(tokenBytes);
+            var token = Convert.ToBase64String(tokenBytes).Replace("+", "-").Replace("/", "_").Replace("=", "");
+            
+            // Set expiration to 24 hours from now
+            var expiration = DateTime.UtcNow.AddHours(24);
+            
+            // Update the state with the token
+            currentState.ClientAccessToken = token;
+            currentState.TokenExpiration = expiration;
+            
+            // Raise an event to update the orchestrator state with the new token
+            var updateTokenData = new TokenUpdateEventData
+            {
+                Token = token,
+                Expiration = expiration
+            };
+            await client.RaiseEventAsync(instanceId, "token_update", JsonSerializer.Serialize(updateTokenData));
+            
+            // Create the encoded access string
+            var accessString = $"{instanceId}:{token}";
+            var accessBytes = Encoding.UTF8.GetBytes(accessString);
+            var encodedAccess = Convert.ToBase64String(accessBytes).Replace("+", "-").Replace("/", "_").Replace("=", "");
+            
+            HttpResponseData response = req.CreateResponse(HttpStatusCode.OK);
+            response.Headers.Add("Content-Type", "application/json");
+            
+            var responseObj = new
+            {
+                accessToken = encodedAccess,
+                expiresAt = expiration.ToString("o"),
+                updateUrl = $"/api/fieldUpdate/{encodedAccess}"
+            };
+            
+            await response.WriteStringAsync(JsonSerializer.Serialize(responseObj));
+            return response;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "SessionOrchestrator_GenerateClientToken: Error generating token for instance {InstanceId}", instanceId);
+            var errorResponse = req.CreateResponse(HttpStatusCode.InternalServerError);
+            await errorResponse.WriteStringAsync(JsonSerializer.Serialize(new { error = "Failed to generate token", message = ex.Message }));
+            return errorResponse;
+        }
+    }
+
+    [Function("SessionOrchestrator_ClientFieldUpdate_Options")]
+    public HttpResponseData ClientFieldUpdateOptions(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "options", Route = "fieldUpdate/{encodedAccess}")] HttpRequestData req,
+        string encodedAccess)
+    {
+        // Handle CORS preflight request
+        var response = req.CreateResponse(HttpStatusCode.OK);
+        response.Headers.Add("Access-Control-Allow-Origin", "*");
+        response.Headers.Add("Access-Control-Allow-Methods", "POST, OPTIONS");
+        response.Headers.Add("Access-Control-Allow-Headers", "Content-Type, Authorization");
+        response.Headers.Add("Access-Control-Max-Age", "86400"); // 24 hours
+        return response;
+    }
+
+    [Function("SessionOrchestrator_ClientFieldUpdate")]
+    public async Task<HttpResponseData> ClientFieldUpdate(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "fieldUpdate/{encodedAccess}")] HttpRequestData req,
+        string encodedAccess,
+        [DurableClient] DurableTaskClient client)
+    {
+        try
+        {
+            // Decode the access string
+            var normalizedAccess = encodedAccess.Replace("-", "+").Replace("_", "/");
+            // Add padding if necessary
+            var padding = (4 - (normalizedAccess.Length % 4)) % 4;
+            normalizedAccess += new string('=', padding);
+            
+            string decodedAccess;
+            try
+            {
+                var accessBytes = Convert.FromBase64String(normalizedAccess);
+                decodedAccess = Encoding.UTF8.GetString(accessBytes);
+            }
+            catch (FormatException)
+            {
+                var badRequest = req.CreateResponse(HttpStatusCode.BadRequest);
+                badRequest.Headers.Add("Content-Type", "application/json");
+                badRequest.Headers.Add("Access-Control-Allow-Origin", "*");
+                await badRequest.WriteStringAsync("{\"error\": \"Invalid access token format\"}");
+                return badRequest;
+            }
+            
+            // Parse instanceId and token
+            var parts = decodedAccess.Split(':');
+            if (parts.Length != 2)
+            {
+                var badRequest = req.CreateResponse(HttpStatusCode.BadRequest);
+                badRequest.Headers.Add("Content-Type", "application/json");
+                badRequest.Headers.Add("Access-Control-Allow-Origin", "*");
+                await badRequest.WriteStringAsync("{\"error\": \"Invalid access token structure\"}");
+                return badRequest;
+            }
+            
+            var instanceId = parts[0];
+            var providedToken = parts[1];
+            
+            // Get current state and validate token
+            SessionState? currentState = await GetCurrentStateAsync(client, instanceId);
+            if (currentState == null)
+            {
+                var notFound = req.CreateResponse(HttpStatusCode.NotFound);
+                notFound.Headers.Add("Content-Type", "application/json");
+                notFound.Headers.Add("Access-Control-Allow-Origin", "*");
+                await notFound.WriteStringAsync("{\"error\": \"Session not found\"}");
+                return notFound;
+            }
+            
+            // Validate token
+            if (string.IsNullOrEmpty(currentState.ClientAccessToken) || 
+                currentState.ClientAccessToken != providedToken)
+            {
+                var unauthorized = req.CreateResponse(HttpStatusCode.Unauthorized);
+                unauthorized.Headers.Add("Content-Type", "application/json");
+                unauthorized.Headers.Add("Access-Control-Allow-Origin", "*");
+                await unauthorized.WriteStringAsync("{\"error\": \"Invalid or expired access token\"}");
+                return unauthorized;
+            }
+            
+            // Check token expiration
+            if (currentState.TokenExpiration.HasValue && currentState.TokenExpiration.Value < DateTime.UtcNow)
+            {
+                var unauthorized = req.CreateResponse(HttpStatusCode.Unauthorized);
+                unauthorized.Headers.Add("Content-Type", "application/json");
+                unauthorized.Headers.Add("Access-Control-Allow-Origin", "*");
+                await unauthorized.WriteStringAsync("{\"error\": \"Access token has expired\"}");
+                return unauthorized;
+            }
+            
+            // Read and parse the request body
+            using var reader = new StreamReader(req.Body);
+            string body = await reader.ReadToEndAsync();
+            
+            var fieldUpdateRequest = JsonSerializer.Deserialize<FieldUpdateRequest>(body, 
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            
+            if (fieldUpdateRequest?.NewFieldValues == null || fieldUpdateRequest.NewFieldValues.Count == 0)
+            {
+                var badRequest = req.CreateResponse(HttpStatusCode.BadRequest);
+                badRequest.Headers.Add("Content-Type", "application/json");
+                badRequest.Headers.Add("Access-Control-Allow-Origin", "*");
+                await badRequest.WriteStringAsync("{\"error\": \"NewFieldValues array is required and cannot be empty\"}");
+                return badRequest;
+            }
+            
+            // Load the form to validate field IDs
+            var (form, error, fieldIds) = await LoadFormAsync(req, currentState);
+            if (error != null || form == null)
+            {
+                var errorResponse = req.CreateResponse(HttpStatusCode.NotFound);
+                errorResponse.Headers.Add("Content-Type", "application/json");
+                errorResponse.Headers.Add("Access-Control-Allow-Origin", "*");
+                await errorResponse.WriteStringAsync("{\"error\": \"Form not found or could not be loaded\"}");
+                return errorResponse;
+            }
+            
+            // Validate that all fields exist in the form
+            var validFieldIds = form.Body?.Select(f => f.Id).ToHashSet() ?? new HashSet<string>();
+            var invalidFields = fieldUpdateRequest.NewFieldValues
+                .Where(fv => !string.IsNullOrEmpty(fv.FieldName) && !validFieldIds.Contains(fv.FieldName))
+                .Select(fv => fv.FieldName)
+                .ToList();
+            
+            if (invalidFields.Count > 0)
+            {
+                var badRequest = req.CreateResponse(HttpStatusCode.BadRequest);
+                badRequest.Headers.Add("Content-Type", "application/json");
+                badRequest.Headers.Add("Access-Control-Allow-Origin", "*");
+                var errorMsg = new
+                {
+                    error = "Invalid field IDs provided",
+                    invalidFields = invalidFields
+                };
+                await badRequest.WriteStringAsync(JsonSerializer.Serialize(errorMsg));
+                return badRequest;
+            }
+            
+            // Validate the field values using the validation agent
+            var validationResult = await _fieldValidationAgent.ValidateFieldValuesAsync(
+                string.Empty,
+                form,
+                currentState.CompletedFieldValues,
+                fieldUpdateRequest.NewFieldValues);
+            
+            // Create message list with form_input notification
+            var fieldNames = fieldUpdateRequest.NewFieldValues.Select(f => f.FieldName).ToArray();
+            var messageList = new List<string>
+            {
+                $"form_input: [{string.Join(", ", fieldNames)}] (via client)"
+            };
+            
+            // Create form action event data with field updates and messages
+            var formActionData = new FormActionEventData
+            {
+                NewFieldValues = fieldUpdateRequest.NewFieldValues,
+                Messages = messageList
+            };
+            
+            // Raise the form_action event to the orchestrator
+            await client.RaiseEventAsync(instanceId, EventNames[1], JsonSerializer.Serialize(formActionData));
+            
+            HttpResponseData response = req.CreateResponse(HttpStatusCode.Accepted);
+            response.Headers.Add("Content-Type", "application/json");
+            response.Headers.Add("Access-Control-Allow-Origin", "*");
+            
+            // Build response object with conditional validation fields
+            var responseDict = new Dictionary<string, object>
+            {
+                ["status"] = "accepted",
+                ["message"] = "Field updates queued for processing",
+                ["updatedFields"] = fieldUpdateRequest.NewFieldValues.Count
+            };
+            
+            // Add errors at root level if present
+            if (validationResult.Errors != null && validationResult.Errors.Count > 0)
+            {
+                responseDict["errors"] = validationResult.Errors;
+            }
+            
+            // Add warnings at root level if present
+            if (validationResult.Warnings != null && validationResult.Warnings.Count > 0)
+            {
+                responseDict["warnings"] = validationResult.Warnings;
+            }
+            
+            await response.WriteStringAsync(JsonSerializer.Serialize(responseDict));
+            return response;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "SessionOrchestrator_ClientFieldUpdate: Error processing field update");
+            var errorResponse = req.CreateResponse(HttpStatusCode.InternalServerError);
+            errorResponse.Headers.Add("Access-Control-Allow-Origin", "*");
+            await errorResponse.WriteStringAsync(JsonSerializer.Serialize(new { error = "Failed to process field update", message = ex.Message }));
+            return errorResponse;
+        }
+    }
+
 
     private class MessageEventData
     {
@@ -537,6 +824,12 @@ public class SessionOrchestrator
     private class FieldUpdateRequest
     {
         public List<FormFieldValue>? NewFieldValues { get; set; }
+    }
+
+    private class TokenUpdateEventData
+    {
+        public string? Token { get; set; }
+        public DateTime? Expiration { get; set; }
     }
 
     private void UpdateFieldValues(SessionState state, List<FormFieldValue> newFieldValues, string explicitNote = "")

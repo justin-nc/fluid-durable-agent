@@ -57,3 +57,23 @@ POST http://localhost:7071/api/session/{{instanceId}}/fields
 
 ####
 GET http://localhost:7071/api/session/{{instanceId}}/fields
+
+###
+
+POST /api/session/{instanceId}/token
+
+# Response:
+{
+  "accessToken": "aW5zdGFuY2VJZDp0b2tlbg...",
+  "expiresAt": "2026-02-03T12:00:00.000Z",
+  "updateUrl": "/api/fieldUpdate/aW5zdGFuY2VJZDp0b2tlbg..."
+}
+
+###
+
+POST /api/fieldUpdate/aW5zdGFuY2VJZDp0b2tlbg...
+{
+  "newFieldValues": [
+    { "fieldName": "email", "value": "user@example.com" }
+  ]
+}
