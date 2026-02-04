@@ -8,6 +8,7 @@ public class ConversationResponse
     public string? FinalThoughts { get; set; }
     public string? FieldFocus { get; set; }
     public DraftedField? DraftedField { get; set; }
+    public List<string>? ResponseOptions { get; set; }
 }
 
 public class DraftedField

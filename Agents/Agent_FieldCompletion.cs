@@ -131,30 +131,70 @@ An array of FIELD_VALUES that are completed based on the latest user input.  THI
         {
             new(Microsoft.Extensions.AI.ChatRole.User, prompt)
         };
-        var content="";
-        // Parse the JSON response
-        try
+
+        // Try up to 3 times to extract field values with 200ms delay between attempts
+        int maxAttempts = 3;
+        for (int attempt = 0; attempt < maxAttempts; attempt++)
         {
-            var response = await _chatClient.GetResponseAsync(messages, cancellationToken: default);
-            content = response?.Text ?? "{}";       
-            var responseWrapper = JsonSerializer.Deserialize<List<FormFieldValue>>(content, 
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            return responseWrapper ?? new List<FormFieldValue>();
-        }
-        catch (JsonException)
-        {
-            // If parsing fails, try to extract JSON from the response
-            var jsonStart = content.IndexOf('{');
-            var jsonEnd = content.LastIndexOf('}');
-            if (jsonStart >= 0 && jsonEnd > jsonStart)
+            var content = "";
+            try
             {
-                var jsonContent = content.Substring(jsonStart, jsonEnd - jsonStart + 1);
-                var responseWrapper = JsonSerializer.Deserialize<FieldCompletionResponse>(jsonContent,
+                var response = await _chatClient.GetResponseAsync(messages, cancellationToken: default);
+                content = response?.Text ?? "{}";       
+                var responseWrapper = JsonSerializer.Deserialize<List<FormFieldValue>>(content, 
                     new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                return responseWrapper?.NewFieldValues ?? new List<FormFieldValue>();
+                
+                // If we got results, return them
+                if (responseWrapper != null && responseWrapper.Count > 0)
+                {
+                    return responseWrapper;
+                }
+                
+                // If no results and this is the last attempt, return empty list
+                if (attempt == maxAttempts - 1)
+                {
+                    return new List<FormFieldValue>();
+                }
             }
-            return new List<FormFieldValue>();
+            catch (JsonException)
+            {
+                // If parsing fails, try to extract JSON from the response
+                var jsonStart = content.IndexOf('{');
+                var jsonEnd = content.LastIndexOf('}');
+                if (jsonStart >= 0 && jsonEnd > jsonStart)
+                {
+                    try
+                    {
+                        var jsonContent = content.Substring(jsonStart, jsonEnd - jsonStart + 1);
+                        var responseWrapper = JsonSerializer.Deserialize<FieldCompletionResponse>(jsonContent,
+                            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                        
+                        if (responseWrapper?.NewFieldValues != null && responseWrapper.NewFieldValues.Count > 0)
+                        {
+                            return responseWrapper.NewFieldValues;
+                        }
+                    }
+                    catch (JsonException)
+                    {
+                        // Continue to retry if not last attempt
+                    }
+                }
+                
+                // If this is the last attempt, return empty list
+                if (attempt == maxAttempts - 1)
+                {
+                    return new List<FormFieldValue>();
+                }
+            }
+
+            // Delay before retry (except on last iteration)
+            if (attempt < maxAttempts - 1)
+            {
+                await Task.Delay(200);
+            }
         }
+
+        return new List<FormFieldValue>();
     }
 
     private class FieldCompletionResponse

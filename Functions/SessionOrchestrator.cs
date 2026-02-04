@@ -18,21 +18,25 @@ namespace fluid_durable_agent.Functions;
 public class SessionOrchestrator
 {
     private const string OrchestratorName = "SessionOrchestrator";
-    private static readonly string[] EventNames = ["message", "form_action", "token_update"]; // Add more event names here as needed
+    private static readonly string[] EventNames = ["message", "form_action", "token_update", "invalid_input"]; // Add more event names here as needed
     private const string FormsContainer = "forms";
     
     private readonly BlobStorageService _blobStorageService;
     private readonly Agent_FieldCompletion _fieldCompletionAgent;
     private readonly Agent_FieldValidation _fieldValidationAgent;
     private readonly Agent_Conversation _conversationAgent;
+    private readonly Agent_MessageEvaluate _messageEvaluateAgent;
+    private readonly Agent_ConversationRedirect _conversationRedirectAgent;
     private readonly ILogger<SessionOrchestrator> _logger;
 
-    public SessionOrchestrator(BlobStorageService blobStorageService, Agent_FieldCompletion fieldCompletionAgent, Agent_FieldValidation fieldValidationAgent, Agent_Conversation conversationAgent,  ILogger<SessionOrchestrator> logger)
+    public SessionOrchestrator(BlobStorageService blobStorageService, Agent_FieldCompletion fieldCompletionAgent, Agent_FieldValidation fieldValidationAgent, Agent_Conversation conversationAgent, Agent_MessageEvaluate messageEvaluateAgent, Agent_ConversationRedirect conversationRedirectAgent, ILogger<SessionOrchestrator> logger)
     {
         _blobStorageService = blobStorageService;
         _fieldCompletionAgent = fieldCompletionAgent;
         _fieldValidationAgent = fieldValidationAgent;
         _conversationAgent = conversationAgent;
+        _messageEvaluateAgent = messageEvaluateAgent;
+        _conversationRedirectAgent = conversationRedirectAgent;
         _logger = logger;
     }
 
@@ -120,6 +124,11 @@ public class SessionOrchestrator
                         state.TokenExpiration = tokenUpdateData.Expiration;
                         logger.LogInformation("Updated client access token, expires at {Expiration}", tokenUpdateData.Expiration);
                     }
+                    break;
+                case "invalid_input":
+                    messageData = JsonSerializer.Deserialize<MessageEventData>(eventData, 
+                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                    state.NewMessage = messageData.Messages[messageData.Messages.Count - 1];                    
                     break;
                 default:
                     logger.LogWarning("Received unknown event type: {EventType}", eventType);
@@ -228,8 +237,10 @@ public class SessionOrchestrator
                 _logger.LogWarning("SessionOrchestrator_Send: No form specified for instance {InstanceId}", instanceId);
                 var errorResponse = req.CreateResponse(HttpStatusCode.NotFound);
                 await errorResponse.WriteStringAsync(JsonSerializer.Serialize(new { error = "No form specified for this request." }));
-                return errorResponse;
+                return errorResponse;                
             }        
+
+
             var (form, error, fieldIds) = await LoadFormAsync(req, currentState);
             if (error != null || form == null)
             {
@@ -239,54 +250,115 @@ public class SessionOrchestrator
                 return errorResponse;
             }
 
-            // Try up to 3 times to extract field values with 200ms delay between attempts
-            var newFieldValues = new List<FormFieldValue>();
-            if  (body.Trim().Length > 0) {
-                int maxAttempts = 3;
-                for (int attempt = 0; attempt < maxAttempts; attempt++)
+            // Evaluate the message to understand user intent
+            // Extract form context from CodeBlock with id="context" if available
+            var formContext = string.Empty;
+            var contextBlock = form.Body?.FirstOrDefault(b => b.Type == "CodeBlock" && b.Id == "context");
+            if (contextBlock != null && !string.IsNullOrEmpty(contextBlock.CodeSnippet))
+            {
+                formContext = contextBlock.CodeSnippet;
+            }
+            else
+            {
+                // Fallback to serializing the entire form if no context block found
+                formContext = JsonSerializer.Serialize(form, new JsonSerializerOptions { WriteIndented = false });
+            }
+            
+            var priorMessages = currentState.History ?? new List<string>();
+            priorMessages.Add(body);
+            
+            //Look at the message to evaluate its content
+            var evaluationStopwatch = Stopwatch.StartNew();
+            var messageEvaluation = await _messageEvaluateAgent.EvaluateMessageAsync(priorMessages, formContext);
+            evaluationStopwatch.Stop();
+            _logger.LogInformation("EvaluateMessageAsync completed in {Seconds:F2} seconds. Question: {Question}, Request: {Request}, Distraction: {Distraction}, Values: {Values}",
+                evaluationStopwatch.Elapsed.TotalSeconds,
+                messageEvaluation.ContainsQuestion,
+                messageEvaluation.ContainsRequest,
+                messageEvaluation.ContainsDistraction,
+                messageEvaluation.ContainsValues);
+
+            // Handle distraction - User appears to be focused on something other than the form
+            if (messageEvaluation.ContainsDistraction)
+            {
+                _logger.LogWarning("Distraction detected in message for instance {InstanceId}", instanceId);
+                
+                // Log the invalid input event
+                var invalidInputEvent = new { message = body, reason = "distraction" };
+                await client.RaiseEventAsync(instanceId, "invalid_input", JsonSerializer.Serialize(invalidInputEvent));
+                
+                // Generate redirect response using Agent_ConversationRedirect
+                var redirectStopwatch = Stopwatch.StartNew();
+                var redirectResponse = await _conversationRedirectAgent.GenerateRedirectResponseAsync(
+                    form,
+                    currentState.CompletedFieldValues,
+                    focusFieldId: null
+                );
+                redirectStopwatch.Stop();
+                _logger.LogInformation("GenerateRedirectResponseAsync completed in {Seconds:F2} seconds", redirectStopwatch.Elapsed.TotalSeconds);
+                
+                // Return redirect response
+                HttpResponseData distractionResponse = req.CreateResponse(HttpStatusCode.OK);
+                distractionResponse.Headers.Add("Content-Type", "application/json");
+                var distractionResponseDict = new Dictionary<string, object>
                 {
-                    if (attempt > 0)
-                    {
-                        _logger.LogInformation("Retrying field extraction, attempt {Attempt}", attempt + 1);
-                        // Delay 200ms between attempts
-                        await Task.Delay(200);
-                    }
-                    
-                    var extractStopwatch = Stopwatch.StartNew();
-                    var extractedFields = await _fieldCompletionAgent.ExtractFieldValuesAsync(
-                        body, 
-                        form, 
-                        currentState.CompletedFieldValues);
-                    extractStopwatch.Stop();
-                    _logger.LogInformation("ExtractFieldValuesAsync completed in {Seconds:F2} seconds", extractStopwatch.Elapsed.TotalSeconds);
-                    
-                    if (extractedFields != null && extractedFields.Count > 0)
-                    {
-                        newFieldValues = extractedFields;
-                        _logger.LogInformation("Field extraction succeeded on attempt {Attempt}", attempt + 1);
-                        break;
-                    }
-                    
-                    _logger.LogInformation("Field extraction attempt {Attempt} returned no fields", attempt + 1);
+                    ["status"] = "distraction_detected"
+                };
+                
+                if (!string.IsNullOrEmpty(redirectResponse.FinalThoughts))
+                {
+                    distractionResponseDict["finalThoughts"] = redirectResponse.FinalThoughts;
+                }
+                if (!string.IsNullOrEmpty(redirectResponse.FieldFocus))
+                {
+                    distractionResponseDict["fieldFocus"] = redirectResponse.FieldFocus;
+                }
+                if (redirectResponse.ResponseOptions != null && redirectResponse.ResponseOptions.Count > 0)
+                {
+                    distractionResponseDict["responseOptions"] = redirectResponse.ResponseOptions;
+                }
+                
+                await distractionResponse.WriteStringAsync(JsonSerializer.Serialize(distractionResponseDict));
+                return distractionResponse;
+            }
+
+            // Process based on message evaluation
+            var newFieldValues = new List<FormFieldValue>();
+            var validationResult = new ValidationResult();
+
+            // If message contains values, extract and validate field values
+            if (messageEvaluation.ContainsValues && body.Trim().Length > 0)
+            {
+                var extractStopwatch = Stopwatch.StartNew();
+                newFieldValues = await _fieldCompletionAgent.ExtractFieldValuesAsync(
+                    body, 
+                    form, 
+                    currentState.CompletedFieldValues);
+                extractStopwatch.Stop();
+                _logger.LogInformation("ExtractFieldValuesAsync completed in {Seconds:F2} seconds with {Count} fields extracted",
+                    extractStopwatch.Elapsed.TotalSeconds,
+                    newFieldValues?.Count ?? 0);
+
+                // Update current state with new values
+                if (newFieldValues != null && newFieldValues.Count > 0)
+                {
+                    UpdateFieldValues(currentState, newFieldValues);
+                }
+                
+                // Validate new field values
+                if (newFieldValues != null && newFieldValues.Count > 0)
+                {
+                    var validationStopwatch = Stopwatch.StartNew();
+                    validationResult = await _fieldValidationAgent.ValidateFieldValuesAsync(
+                        body,
+                        form,
+                        currentState.CompletedFieldValues,
+                        newFieldValues);
+                    validationStopwatch.Stop();
+                    _logger.LogInformation("ValidateFieldValuesAsync completed in {Seconds:F2} seconds", validationStopwatch.Elapsed.TotalSeconds);
                 }
             }
-            //If new values are present, update current state
-            UpdateFieldValues(currentState, newFieldValues);
-            
-            //If there are new fields to validate:
-            var validationResult = new ValidationResult();            
-            if (newFieldValues != null && newFieldValues.Count > 0)
-            {
-                // Only validate if new field values were discovered
-                var validationStopwatch = Stopwatch.StartNew();
-                validationResult = await _fieldValidationAgent.ValidateFieldValuesAsync(
-                body,
-                form,
-                currentState.CompletedFieldValues,
-                newFieldValues);
-                validationStopwatch.Stop();
-                _logger.LogInformation("ValidateFieldValuesAsync completed in {Seconds:F2} seconds", validationStopwatch.Elapsed.TotalSeconds);
-            }
+            // If contains question or request, skip field completion (go straight to conversation)
 
             // Generate conversational response
             var conversationStopwatch = Stopwatch.StartNew();
@@ -297,6 +369,7 @@ public class SessionOrchestrator
                 newFieldValues,
                 validationResult,
                 focusFieldId: null // TODO: Add focusFieldId parameter to the Send function if needed
+                
             );
             conversationStopwatch.Stop();
             _logger.LogInformation("GenerateResponseAsync completed in {Seconds:F2} seconds", conversationStopwatch.Elapsed.TotalSeconds);
@@ -385,6 +458,10 @@ public class SessionOrchestrator
             if (!string.IsNullOrEmpty(conversationResponse.FieldFocus))
             {
                 responseDict["fieldFocus"] = conversationResponse.FieldFocus;
+            }
+            if (conversationResponse.ResponseOptions != null && conversationResponse.ResponseOptions.Count > 0)
+            {
+                responseDict["responseOptions"] = conversationResponse.ResponseOptions;
             }
             
 
