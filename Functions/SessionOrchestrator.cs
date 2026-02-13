@@ -21,6 +21,7 @@ public class SessionOrchestrator
     private const string OrchestratorName = "SessionOrchestrator";
     private static readonly string[] EventNames = ["message", "form_action", "token_update", "invalid_input"]; // Add more event names here as needed
     private const string FormsContainer = "forms";
+    private const string SessionMappingContainer = "session-mappings";
     
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -128,7 +129,6 @@ public class SessionOrchestrator
                     {
                         state.ClientAccessToken = tokenUpdateData.Token;
                         state.TokenExpiration = tokenUpdateData.Expiration;
-                        logger.LogInformation("Updated client access token, expires at {Expiration}", tokenUpdateData.Expiration);
                     }
                     break;
                 case "invalid_input":
@@ -207,8 +207,18 @@ public class SessionOrchestrator
                 return badRequest;
             }
 
-            // Process FormData if provided
-            var completedFieldValues = startRequest.FormData ?? new Dictionary<string, FieldValue>();
+            // Process FormData if provided - convert Dictionary<string, string> to Dictionary<string, FieldValue>
+            var completedFieldValues = new Dictionary<string, FieldValue>();
+            if (startRequest.FormData != null)
+            {
+                foreach (var kvp in startRequest.FormData)
+                {
+                    completedFieldValues[kvp.Key] = new FieldValue
+                    {
+                        Value = JsonSerializer.SerializeToElement(kvp.Value)
+                    };
+                }
+            }
 
             string instanceId = await client.ScheduleNewOrchestrationInstanceAsync(
                 OrchestratorName,
@@ -268,13 +278,18 @@ public class SessionOrchestrator
                 }
             }
             
-            // Get current state before processing
-            SessionState? currentState = await GetCurrentStateAsync(client, instanceId);
-            if (currentState.FormCode == null) {
+            // Get and validate current state
+            var (currentState, errorResponse) = await GetValidatedStateAsync(client, instanceId, req);
+            if (errorResponse != null)
+            {
+                return errorResponse;
+            }
+            
+            if (currentState?.FormCode == null) {
                 _logger.LogWarning("SessionOrchestrator_Send: No form specified for instance {InstanceId}", instanceId);
-                var errorResponse = req.CreateResponse(HttpStatusCode.NotFound);
-                await errorResponse.WriteStringAsync(JsonSerializer.Serialize(new { error = "No form specified for this request." }));
-                return errorResponse;                
+                var notFoundResponse = req.CreateResponse(HttpStatusCode.NotFound);
+                await notFoundResponse.WriteStringAsync(JsonSerializer.Serialize(new { error = "No form specified for this request." }));
+                return notFoundResponse;                
             }        
 
 
@@ -282,9 +297,9 @@ public class SessionOrchestrator
             if (error != null || form == null)
             {
                 _logger.LogWarning("SessionOrchestrator_Send: Form not found for instance {InstanceId}. FormCode: {FormCode}", instanceId, currentState.FormCode);
-                var errorResponse = req.CreateResponse(HttpStatusCode.NotFound);
-                await errorResponse.WriteStringAsync(JsonSerializer.Serialize(new { error = "Form Instance not found or no status available" }));
-                return errorResponse;
+                var formErrorResponse = req.CreateResponse(HttpStatusCode.NotFound);
+                await formErrorResponse.WriteStringAsync(JsonSerializer.Serialize(new { error = "Form Instance not found or no status available" }));
+                return formErrorResponse;
             }
 
             // Evaluate the message to understand user intent
@@ -566,12 +581,22 @@ public class SessionOrchestrator
         HttpResponseData response = req.CreateResponse(HttpStatusCode.OK);
         response.Headers.Add("Content-Type", "application/json");
         
+        // Convert Dictionary<string, FieldValue> to Dictionary<string, string> for output
+        var completedFieldValuesOutput = new Dictionary<string, string>();
+        if (currentState.CompletedFieldValues != null)
+        {
+            foreach (var kvp in currentState.CompletedFieldValues)
+            {
+                completedFieldValuesOutput[kvp.Key] = kvp.Value.Value?.ToString() ?? "";
+            }
+        }
+        
         var responseObject = new
         {
             instanceId = instanceId,
             formCode = currentState.FormCode,
             version = currentState.Version,
-            completedFieldValues = currentState.CompletedFieldValues ?? new Dictionary<string, FieldValue>()
+            completedFieldValues = completedFieldValuesOutput
         };
         
         await response.WriteStringAsync(JsonSerializer.Serialize(responseObject, JsonOptions));
@@ -599,24 +624,21 @@ public class SessionOrchestrator
             return badRequest;
         }
         
-        // Get current state to validate the instance exists
-        SessionState? currentState = await GetCurrentStateAsync(client, instanceId);
-        if (currentState == null)
+        // Get and validate current state
+        var (currentState, errorResponse) = await GetValidatedStateAsync(client, instanceId, req);
+        if (errorResponse != null)
         {
-            var notFound = req.CreateResponse(HttpStatusCode.NotFound);
-            notFound.Headers.Add("Content-Type", "application/json");
-            await notFound.WriteStringAsync("{\"error\": \"Instance not found\"}");
-            return notFound;
+            return errorResponse;
         }
         
         // Load the form to validate field IDs
         var (form, error, fieldIds, sectionNames) = await LoadFormAsync(req, currentState);
         if (error != null || form == null)
         {
-            var errorResponse = req.CreateResponse(HttpStatusCode.NotFound);
-            errorResponse.Headers.Add("Content-Type", "application/json");
-            await errorResponse.WriteStringAsync("{\"error\": \"Form not found or could not be loaded\"}");
-            return errorResponse;
+            var formErrorResponse = req.CreateResponse(HttpStatusCode.NotFound);
+            formErrorResponse.Headers.Add("Content-Type", "application/json");
+            await formErrorResponse.WriteStringAsync("{\"error\": \"Form not found or could not be loaded\"}");
+            return formErrorResponse;
         }
         
         // Validate that all fields exist in the form
@@ -708,25 +730,39 @@ public class SessionOrchestrator
                 return notFound;
             }
 
-            // Generate a secure token
-            var tokenBytes = new byte[32];
-            RandomNumberGenerator.Fill(tokenBytes);
-            var token = Convert.ToBase64String(tokenBytes).Replace("+", "-").Replace("/", "_").Replace("=", "");
+            string token;
+            DateTime expiration;
             
-            // Set expiration to 24 hours from now
-            var expiration = DateTime.UtcNow.AddHours(24);
-            
-            // Update the state with the token
-            currentState.ClientAccessToken = token;
-            currentState.TokenExpiration = expiration;
-            
-            // Raise an event to update the orchestrator state with the new token
-            var updateTokenData = new TokenUpdateEventData
+            // Check if a valid token already exists
+            if (!string.IsNullOrEmpty(currentState.ClientAccessToken) && 
+                currentState.TokenExpiration.HasValue && 
+                currentState.TokenExpiration.Value > DateTime.UtcNow)
             {
-                Token = token,
-                Expiration = expiration
-            };
-            await client.RaiseEventAsync(instanceId, "token_update", JsonSerializer.Serialize(updateTokenData));
+                // Return existing valid token
+                token = currentState.ClientAccessToken;
+                expiration = currentState.TokenExpiration.Value;
+                _logger.LogInformation("Returning existing valid token for instance {InstanceId}, expires at {Expiration}", instanceId, expiration);
+            }
+            else
+            {
+                // Generate a new secure token
+                var tokenBytes = new byte[32];
+                RandomNumberGenerator.Fill(tokenBytes);
+                token = Convert.ToBase64String(tokenBytes).Replace("+", "-").Replace("/", "_").Replace("=", "");
+                
+                // Set expiration to 24 hours from now
+                expiration = DateTime.UtcNow.AddHours(24);
+                
+                // Raise an event to update the orchestrator state with the new token
+                var updateTokenData = new TokenUpdateEventData
+                {
+                    Token = token,
+                    Expiration = expiration
+                };
+                await client.RaiseEventAsync(instanceId, "token_update", JsonSerializer.Serialize(updateTokenData));
+                
+                _logger.LogInformation("Generated new token for instance {InstanceId}, expires at {Expiration}", instanceId, expiration);
+            }
             
             // Create the encoded access string
             var accessString = $"{instanceId}:{token}";
@@ -812,15 +848,11 @@ public class SessionOrchestrator
             var instanceId = parts[0];
             var providedToken = parts[1];
             
-            // Get current state and validate token
-            SessionState? currentState = await GetCurrentStateAsync(client, instanceId);
-            if (currentState == null)
+            // Get and validate current state
+            var (currentState, errorResponse) = await GetValidatedStateAsync(client, instanceId, req, includeCorsHeaders: true);
+            if (errorResponse != null)
             {
-                var notFound = req.CreateResponse(HttpStatusCode.NotFound);
-                notFound.Headers.Add("Content-Type", "application/json");
-                notFound.Headers.Add("Access-Control-Allow-Origin", "*");
-                await notFound.WriteStringAsync("{\"error\": \"Session not found\"}");
-                return notFound;
+                return errorResponse;
             }
             
             // Validate token
@@ -864,11 +896,11 @@ public class SessionOrchestrator
             var (form, error, fieldIds, sectionNames) = await LoadFormAsync(req, currentState);
             if (error != null || form == null)
             {
-                var errorResponse = req.CreateResponse(HttpStatusCode.NotFound);
-                errorResponse.Headers.Add("Content-Type", "application/json");
-                errorResponse.Headers.Add("Access-Control-Allow-Origin", "*");
-                await errorResponse.WriteStringAsync("{\"error\": \"Form not found or could not be loaded\"}");
-                return errorResponse;
+                var formErrorResponse = req.CreateResponse(HttpStatusCode.NotFound);
+                formErrorResponse.Headers.Add("Content-Type", "application/json");
+                formErrorResponse.Headers.Add("Access-Control-Allow-Origin", "*");
+                await formErrorResponse.WriteStringAsync("{\"error\": \"Form not found or could not be loaded\"}");
+                return formErrorResponse;
             }
             
             // Validate that all fields exist in the form
@@ -923,9 +955,9 @@ public class SessionOrchestrator
             // Build response object with conditional validation fields
             var responseDict = new Dictionary<string, object>
             {
-                ["status"] = "accepted",
-                ["message"] = "Field updates queued for processing",
-                ["updatedFields"] = fieldUpdateRequest.NewFieldValues.Count
+                { "status", "accepted" },
+                { "message", "Field updates queued for processing" },
+                { "updatedFields", fieldUpdateRequest.NewFieldValues.Count }
             };
             
             // Add errors at root level if present
@@ -975,6 +1007,13 @@ public class SessionOrchestrator
     {
         public string? Token { get; set; }
         public DateTime? Expiration { get; set; }
+    }
+
+    private class SessionMapping
+    {
+        public string OldInstanceId { get; set; } = string.Empty;
+        public string NewInstanceId { get; set; } = string.Empty;
+        public DateTime ReplacedAt { get; set; }
     }
 
     private void UpdateFieldValues(SessionState state, List<FormFieldValue> newFieldValues, string explicitNote = "")
@@ -1047,23 +1086,141 @@ public class SessionOrchestrator
 
     private async Task<SessionState?> GetCurrentStateAsync(DurableTaskClient client, string instanceId)
     {
+        var (state, _) = await GetCurrentStateWithStatusAsync(client, instanceId);
+        return state;
+    }
+
+    private async Task<(SessionState? state, OrchestrationRuntimeStatus? status)> GetCurrentStateWithStatusAsync(DurableTaskClient client, string instanceId)
+    {
         var instance = await client.GetInstanceAsync(instanceId, true);
+        
+        if (instance == null)
+        {
+            return (null, null);
+        }
+        
         SessionState? currentState = null;
         
         // Try to get custom status first, fall back to input if not available
         try
         {
-            currentState = instance?.ReadCustomStatusAs<SessionState>();
+            currentState = instance.ReadCustomStatusAs<SessionState>();
         }
         catch { }
         
         // If custom status is null, try reading from input (initial state)
-        if (currentState == null && instance?.ReadInputAs<SessionState>() is SessionState inputState)
+        if (currentState == null && instance.ReadInputAs<SessionState>() is SessionState inputState)
         {
             currentState = inputState;
         }
         
-        return currentState;
+        return (currentState, instance.RuntimeStatus);
+    }
+
+    private async Task<string?> GetReplacementSessionIdAsync(string oldInstanceId)
+    {
+        try
+        {
+            var mappingJson = await _blobStorageService.ReadFileAsync(
+                "FailedSessionMapping",
+                $"{oldInstanceId}.json",
+                SessionMappingContainer);
+            
+            var mapping = JsonSerializer.Deserialize<SessionMapping>(mappingJson);
+            return mapping?.NewInstanceId;
+        }
+        catch (FileNotFoundException)
+        {
+            return null;
+        }
+    }
+
+    private async Task SaveSessionMappingAsync(string oldInstanceId, string newInstanceId)
+    {
+        var mapping = new SessionMapping
+        {
+            OldInstanceId = oldInstanceId,
+            NewInstanceId = newInstanceId,
+            ReplacedAt = DateTime.UtcNow
+        };
+        
+        var mappingJson = JsonSerializer.Serialize(mapping, JsonOptions);
+        await _blobStorageService.WriteFileAsync(
+            "FailedSessionMapping",
+            $"{oldInstanceId}.json",
+            mappingJson,
+            SessionMappingContainer,
+            overwrite: true);
+    }
+
+    private async Task<(SessionState? state, HttpResponseData? errorResponse)> GetValidatedStateAsync(
+        DurableTaskClient client, 
+        string instanceId, 
+        HttpRequestData req,
+        bool includeCorsHeaders = false)
+    {
+        var (currentState, status) = await GetCurrentStateWithStatusAsync(client, instanceId);
+        
+        // Check if instance exists
+        if (currentState == null)
+        {
+            var notFound = req.CreateResponse(HttpStatusCode.NotFound);
+            notFound.Headers.Add("Content-Type", "application/json");
+            if (includeCorsHeaders)
+            {
+                notFound.Headers.Add("Access-Control-Allow-Origin", "*");
+            }
+            await notFound.WriteStringAsync("{\"error\": \"Instance not found\"}");
+            return (null, notFound);
+        }
+        
+        // Check if orchestration is in a valid state to receive events
+        if (status == OrchestrationRuntimeStatus.Failed || 
+            status == OrchestrationRuntimeStatus.Terminated || 
+            status == OrchestrationRuntimeStatus.Completed)
+        {
+            _logger.LogWarning("Session {InstanceId} is in {Status} state. Checking for replacement session.", instanceId, status);
+            
+            // Check if a replacement session already exists
+            string? existingReplacementId = await GetReplacementSessionIdAsync(instanceId);
+            string newInstanceId;
+            
+            if (existingReplacementId != null)
+            {
+                newInstanceId = existingReplacementId;
+                _logger.LogInformation("Found existing replacement session {NewInstanceId} for failed session {OldInstanceId}", newInstanceId, instanceId);
+            }
+            else
+            {
+                // Create a new orchestration instance with the current state
+                newInstanceId = await client.ScheduleNewOrchestrationInstanceAsync(
+                    OrchestratorName,
+                    currentState);
+                
+                // Save the mapping
+                await SaveSessionMappingAsync(instanceId, newInstanceId);
+                
+                _logger.LogInformation("Created replacement session {NewInstanceId} for failed session {OldInstanceId}", newInstanceId, instanceId);
+            }
+            
+            // Return a response indicating the session was replaced
+            var replacementResponse = req.CreateResponse(HttpStatusCode.Gone);
+            replacementResponse.Headers.Add("Content-Type", "application/json");
+            if (includeCorsHeaders)
+            {
+                replacementResponse.Headers.Add("Access-Control-Allow-Origin", "*");
+            }
+            await replacementResponse.WriteStringAsync(JsonSerializer.Serialize(new 
+            { 
+                error = $"Original session was in {status} state and has been replaced.",
+                oldInstanceId = instanceId,
+                newInstanceId = newInstanceId,
+                message = "Please retry your request with the new session ID."
+            }));
+            return (null, replacementResponse);
+        }
+        
+        return (currentState, null);
     }
 
 }

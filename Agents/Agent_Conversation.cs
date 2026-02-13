@@ -151,7 +151,8 @@ Return a JSON object with the following optional properties. **Only include prop
 - **FinalThoughts**: (string, optional) Conversational text to guide the user forward:
   - Occasioinally Provide encouraging words about their progress (not every time)
   - If the user indicates that they would like to skip the current question or field, acknowledge that and suggest the next logical field to complete
-  - Ask the question related to the next logical field to complete
+  - If the next question is open ended (not a choice field), ask the question related to the next logical field to complete.
+  - If the next question has choices, **DO NOT incorporate the question into FinalThoughts.** Providing the field focus and response options is sufficient. Immediately following your final thought, the user will be presented with the question and options. 
   - If user presents information out of order, acknowledge briefly but guide them to the next field from the top
   - When you draft content, mention it's ready to review but don't rehash the drafted value
   - Avoid mentioning ""required field"" when there are plenty of fields left to complete
@@ -196,7 +197,7 @@ Example 2 - Validation issues:
 Example 3 - Smooth progress:
 {{
   ""AcknowledgeInputs"": ""Perfect! I've recorded the agency name and division."",
-  ""FinalThoughts"": ""Now I need to know a bit about the project.\\n\\nCould you provide the requester's name and contact information?"",
+  ""FinalThoughts"": ""Now I need to know a bit about the project.\\n\\nCould you provide the **requester's name** and **contact information**?"",
   ""FieldFocus"": ""requester_name""
 }}
 
