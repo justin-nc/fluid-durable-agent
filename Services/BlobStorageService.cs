@@ -91,7 +91,7 @@ public class BlobStorageService
         
         if (!await blobClient.ExistsAsync())
         {
-            throw new FileNotFoundException($"Blob not found: {blobPath}");
+            throw new FileNotFoundException($"Blob not found: {blobPath} at container {containerName ?? _defaultContainerName   }");
         }
 
         var response = await blobClient.DownloadContentAsync();

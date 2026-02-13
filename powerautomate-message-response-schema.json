@@ -92,6 +92,14 @@
     "fieldFocus": {
       "type": ["string", "null"],
       "description": "ID of the next field to focus on (optional)"
+    },
+    "responseOptions": {
+      "type": ["array", "null"],
+      "description": "Array of choice options for the focused field (optional, only present when fieldFocus has predefined choices or allows N/A)",
+      "items": {
+        "type": "string",
+        "description": "A choice option or 'N/A'"
+      }
     }
   },
   "required": ["status"],

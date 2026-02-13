@@ -15,6 +15,9 @@
             "dependsOn": "build",
             "options": {
                 "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "reveal": "always"
             }
         },
         {

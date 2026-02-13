@@ -20,7 +20,7 @@ public class Agent_MessageEvaluate
     /// <param name="priorMessages">List of prior messages (expected to include the last assistant and user messages)</param>
     /// <param name="formContext">Form context to help detect relevance or distraction</param>
     /// <returns>MessageEvaluationResult with boolean flags</returns>
-    public async Task<MessageEvaluationResult> EvaluateMessageAsync(List<string> priorMessages, string formContext)
+    public async Task<MessageEvaluationResult> EvaluateMessageAsync(List<string> priorMessages, string formContext, String formFields,  String formSections)
     {
         var safePriorMessages = priorMessages ?? new List<string>();
 
@@ -47,8 +47,12 @@ contains_distraction: The user is attempting to divert the conversation to somet
 - A user may confirm previously provided information or make corrections - this is helpful, not a distraction
 - Only mark as distraction if the content is clearly unrelated to ANY aspect of the form or its subject matter
 - Examples of actual distractions: asking about unrelated topics (weather, sports, personal matters), attempting to change the subject to something completely outside the form's scope
+- A user asking about a certain field or section of the form is NOT a distraction
+ 
 
-contains_values: The content of the message appears to answer one or multiple questions or provide value(s) that could be entered into a form.
+
+contains_values: The content of the message appears to answer one or multiple questions or provide value(s) that could be entered into a form field. This could include direct answers to questions, or volunteering information relevant to the form fields.   
+- Simple one word answers could be field values if the last assistant messsage asked a question.
 
 Always provide your output in json. Here are some example transactions:
 
@@ -80,10 +84,14 @@ response: {{{{""contains_question"": false, ""contains_request"": false, ""conta
 
 FORM CONTEXT: {formContext}
 
+FORM SECTIONS: {formSections}
+
+FORM FIELD NAMES: {formFields}
+
 PROMPT:
 Please evaluate this dialog:
 
-A: {lastAssistantMessage}
+assistant: {lastAssistantMessage}
 user: {lastUserMessage}
 
 Return ONLY valid JSON with the 4 boolean properties: contains_question, contains_request, contains_distraction, contains_values.";
@@ -94,7 +102,7 @@ Return ONLY valid JSON with the 4 boolean properties: contains_question, contain
         };
 
         // Try up to 3 times to get valid JSON
-        int maxAttempts = 3;
+        int maxAttempts = 5;
         for (int attempt = 0; attempt < maxAttempts; attempt++)
         {
             var content = "{}";

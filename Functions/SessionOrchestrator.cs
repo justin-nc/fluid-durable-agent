@@ -4,6 +4,7 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
 using Microsoft.DurableTask;
@@ -20,6 +21,11 @@ public class SessionOrchestrator
     private const string OrchestratorName = "SessionOrchestrator";
     private static readonly string[] EventNames = ["message", "form_action", "token_update", "invalid_input"]; // Add more event names here as needed
     private const string FormsContainer = "forms";
+    
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    };
     
     private readonly BlobStorageService _blobStorageService;
     private readonly Agent_FieldCompletion _fieldCompletionAgent;
@@ -128,7 +134,16 @@ public class SessionOrchestrator
                 case "invalid_input":
                     messageData = JsonSerializer.Deserialize<MessageEventData>(eventData, 
                         new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                    state.NewMessage = messageData.Messages[messageData.Messages.Count - 1];                    
+                    
+                    if (messageData != null && messageData.Messages != null && messageData.Messages.Count > 0)
+                    {
+                        state.NewMessage = messageData.Messages[messageData.Messages.Count - 1];
+                        logger.LogInformation("Recorded invalid input message for instance");
+                    }
+                    else
+                    {
+                        logger.LogWarning("Received invalid_input event with null or empty message data");
+                    }
                     break;
                 default:
                     logger.LogWarning("Received unknown event type: {EventType}", eventType);
@@ -192,7 +207,8 @@ public class SessionOrchestrator
                 return badRequest;
             }
 
-            
+            // Process FormData if provided
+            var completedFieldValues = startRequest.FormData ?? new Dictionary<string, FieldValue>();
 
             string instanceId = await client.ScheduleNewOrchestrationInstanceAsync(
                 OrchestratorName,
@@ -201,7 +217,7 @@ public class SessionOrchestrator
                     FormCode = startRequest.FormCode, 
                     Version = startRequest.Version, 
                     History = new List<string>(),
-                    CompletedFieldValues = new Dictionary<string, FieldValue>()
+                    CompletedFieldValues = completedFieldValues
                 });
             HttpResponseData response = req.CreateResponse(HttpStatusCode.Accepted);
             response.Headers.Add("Content-Type", "application/json");
@@ -231,6 +247,27 @@ public class SessionOrchestrator
             using var reader = new StreamReader(req.Body);
             string body = await reader.ReadToEndAsync();
             
+            // Check for chat_command in the message body
+            string? chat_command = null;
+            var trimmedBody = body.Trim();
+            if (!string.IsNullOrEmpty(trimmedBody) && trimmedBody.StartsWith("/"))
+            {
+                // Extract chat_command: everything between / and first space (or end of string)
+                var spaceIndex = trimmedBody.IndexOf(' ');
+                if (spaceIndex > 1)
+                {
+                    chat_command = trimmedBody.Substring(1, spaceIndex - 1);
+                    // Remove the chat_command from the body
+                    body = trimmedBody.Substring(spaceIndex + 1).TrimStart();
+                }
+                else if (trimmedBody.Length > 1)
+                {
+                    chat_command = trimmedBody.Substring(1);
+                    // chat_command is the entire message, set body to empty
+                    body = string.Empty;
+                }
+            }
+            
             // Get current state before processing
             SessionState? currentState = await GetCurrentStateAsync(client, instanceId);
             if (currentState.FormCode == null) {
@@ -241,7 +278,7 @@ public class SessionOrchestrator
             }        
 
 
-            var (form, error, fieldIds) = await LoadFormAsync(req, currentState);
+            var (form, error, fieldIds, sectionNames) = await LoadFormAsync(req, currentState);
             if (error != null || form == null)
             {
                 _logger.LogWarning("SessionOrchestrator_Send: Form not found for instance {InstanceId}. FormCode: {FormCode}", instanceId, currentState.FormCode);
@@ -265,11 +302,24 @@ public class SessionOrchestrator
             }
             
             var priorMessages = currentState.History ?? new List<string>();
-            priorMessages.Add(body);
+            bool jumpToConversation = false; // This can be set based on certain conditions in the message evaluation if needed
+            if (body.Trim().Length ==0 || chat_command == "next")
+            {
+                jumpToConversation = true;
+                _logger.LogInformation("Message is empty or next chat_command received, skipping to conversation generation for instance {InstanceId}", instanceId);
+            }
+            else {
+                if (chat_command == "init") {
+                    priorMessages.Add($"system: The user message represents an initial dump of information from the user."); // Add the initial message to the prior messages for evaluation
+                }   
+                priorMessages.Add(body); // Add the new message to the prior messages for evaluation
+            }
             
             //Look at the message to evaluate its content
             var evaluationStopwatch = Stopwatch.StartNew();
-            var messageEvaluation = await _messageEvaluateAgent.EvaluateMessageAsync(priorMessages, formContext);
+            var messageEvaluation =chat_command == "init" ? new MessageEvaluationResult { ContainsQuestion = false, ContainsRequest = false, ContainsDistraction = false, ContainsValues = true } : new MessageEvaluationResult { ContainsQuestion = false, ContainsRequest = false, ContainsDistraction = false, ContainsValues = false };
+            if (!jumpToConversation && chat_command != "init") {
+                messageEvaluation =await _messageEvaluateAgent.EvaluateMessageAsync(priorMessages, formContext, fieldIds, sectionNames);
             evaluationStopwatch.Stop();
             _logger.LogInformation("EvaluateMessageAsync completed in {Seconds:F2} seconds. Question: {Question}, Request: {Request}, Distraction: {Distraction}, Values: {Values}",
                 evaluationStopwatch.Elapsed.TotalSeconds,
@@ -277,32 +327,57 @@ public class SessionOrchestrator
                 messageEvaluation.ContainsRequest,
                 messageEvaluation.ContainsDistraction,
                 messageEvaluation.ContainsValues);
+            }
 
             // Handle distraction - User appears to be focused on something other than the form
-            if (messageEvaluation.ContainsDistraction)
-            {
-                _logger.LogWarning("Distraction detected in message for instance {InstanceId}", instanceId);
-                
+            if (messageEvaluation.ContainsDistraction || jumpToConversation)
+            {                              
                 // Log the invalid input event
-                var invalidInputEvent = new { message = body, reason = "distraction" };
-                await client.RaiseEventAsync(instanceId, "invalid_input", JsonSerializer.Serialize(invalidInputEvent));
+                if (chat_command != "next")
+                {
+                     _logger.LogWarning("Distraction detected in message for instance {InstanceId}", instanceId);
+                    var invalidInputEvent = new { message = body, reason = "distraction" };
+                    await client.RaiseEventAsync(instanceId, "invalid_input", JsonSerializer.Serialize(invalidInputEvent));
+                }
                 
                 // Generate redirect response using Agent_ConversationRedirect
                 var redirectStopwatch = Stopwatch.StartNew();
                 var redirectResponse = await _conversationRedirectAgent.GenerateRedirectResponseAsync(
                     form,
                     currentState.CompletedFieldValues,
-                    focusFieldId: null
+                    focusFieldId: null,
+                    jumpToConversation? false : messageEvaluation.ContainsDistraction
                 );
                 redirectStopwatch.Stop();
                 _logger.LogInformation("GenerateRedirectResponseAsync completed in {Seconds:F2} seconds", redirectStopwatch.Elapsed.TotalSeconds);
+                
+                // Log AI response to history
+                string redirectFieldFocusInfo = redirectResponse.FieldFocus != null ? $" [Next focus field: {redirectResponse.FieldFocus}]" : "";
+                var redirectMessageList = new List<string>();
+                
+                // Only add user message if it's not empty and not a "next" command
+                /*if (!string.IsNullOrWhiteSpace(body) && chat_command != "next")
+                {
+                    redirectMessageList.Add($"user: {body}");
+                }*/
+                
+                // Add assistant response to history
+                redirectMessageList.Add($"assistant: {redirectResponse.FinalThoughts}{redirectFieldFocusInfo}");
+                
+                // Raise message event to log to history
+                var redirectMessageEventData = new MessageEventData
+                {
+                    Messages = redirectMessageList,
+                    FieldCompletions = currentState.CompletedFieldValues
+                };
+                await client.RaiseEventAsync(instanceId, EventNames[0], JsonSerializer.Serialize(redirectMessageEventData, JsonOptions));
                 
                 // Return redirect response
                 HttpResponseData distractionResponse = req.CreateResponse(HttpStatusCode.OK);
                 distractionResponse.Headers.Add("Content-Type", "application/json");
                 var distractionResponseDict = new Dictionary<string, object>
                 {
-                    ["status"] = "distraction_detected"
+                    ["status"] = chat_command=="next" ? "next_action" :     "distraction_detected"
                 };
                 
                 if (!string.IsNullOrEmpty(redirectResponse.FinalThoughts))
@@ -312,10 +387,6 @@ public class SessionOrchestrator
                 if (!string.IsNullOrEmpty(redirectResponse.FieldFocus))
                 {
                     distractionResponseDict["fieldFocus"] = redirectResponse.FieldFocus;
-                }
-                if (redirectResponse.ResponseOptions != null && redirectResponse.ResponseOptions.Count > 0)
-                {
-                    distractionResponseDict["responseOptions"] = redirectResponse.ResponseOptions;
                 }
                 
                 await distractionResponse.WriteStringAsync(JsonSerializer.Serialize(distractionResponseDict));
@@ -331,9 +402,10 @@ public class SessionOrchestrator
             {
                 var extractStopwatch = Stopwatch.StartNew();
                 newFieldValues = await _fieldCompletionAgent.ExtractFieldValuesAsync(
-                    body, 
+                    currentState.History.TakeLast(5).ToList(), // Pass the last 20 messages as prior dialog for context 
                     form, 
-                    currentState.CompletedFieldValues);
+                    currentState.CompletedFieldValues,
+                    chat_command=="init"? true : false );// Anticipate bulk completion on initial message
                 extractStopwatch.Stop();
                 _logger.LogInformation("ExtractFieldValuesAsync completed in {Seconds:F2} seconds with {Count} fields extracted",
                     extractStopwatch.Elapsed.TotalSeconds,
@@ -414,7 +486,7 @@ public class SessionOrchestrator
             };
             
             // Raise the message event to the orchestrator with all data
-            await client.RaiseEventAsync(instanceId, EventNames[0], JsonSerializer.Serialize(messageEventData));
+            await client.RaiseEventAsync(instanceId, EventNames[0], JsonSerializer.Serialize(messageEventData, JsonOptions));
             
             HttpResponseData response = req.CreateResponse(HttpStatusCode.Accepted);
             response.Headers.Add("Content-Type", "application/json");
@@ -459,13 +531,9 @@ public class SessionOrchestrator
             {
                 responseDict["fieldFocus"] = conversationResponse.FieldFocus;
             }
-            if (conversationResponse.ResponseOptions != null && conversationResponse.ResponseOptions.Count > 0)
-            {
-                responseDict["responseOptions"] = conversationResponse.ResponseOptions;
-            }
             
 
-            await response.WriteStringAsync(JsonSerializer.Serialize(responseDict));
+            await response.WriteStringAsync(JsonSerializer.Serialize(responseDict, JsonOptions));
             return response;
         }
         catch (Exception ex)
@@ -506,7 +574,7 @@ public class SessionOrchestrator
             completedFieldValues = currentState.CompletedFieldValues ?? new Dictionary<string, FieldValue>()
         };
         
-        await response.WriteStringAsync(JsonSerializer.Serialize(responseObject));
+        await response.WriteStringAsync(JsonSerializer.Serialize(responseObject, JsonOptions));
         return response;
     }
 
@@ -542,7 +610,7 @@ public class SessionOrchestrator
         }
         
         // Load the form to validate field IDs
-        var (form, error, fieldIds) = await LoadFormAsync(req, currentState);
+        var (form, error, fieldIds, sectionNames) = await LoadFormAsync(req, currentState);
         if (error != null || form == null)
         {
             var errorResponse = req.CreateResponse(HttpStatusCode.NotFound);
@@ -593,7 +661,7 @@ public class SessionOrchestrator
         };
         
         // Raise the form_action event to the orchestrator
-        await client.RaiseEventAsync(instanceId, EventNames[1], JsonSerializer.Serialize(formActionData));
+        await client.RaiseEventAsync(instanceId, EventNames[1], JsonSerializer.Serialize(formActionData, JsonOptions));
         
         HttpResponseData response = req.CreateResponse(HttpStatusCode.Accepted);
         response.Headers.Add("Content-Type", "application/json");
@@ -618,7 +686,7 @@ public class SessionOrchestrator
             responseDict["warnings"] = validationResult.Warnings;
         }
         
-        await response.WriteStringAsync(JsonSerializer.Serialize(responseDict));
+        await response.WriteStringAsync(JsonSerializer.Serialize(responseDict, JsonOptions));
         return response;
     }
 
@@ -793,7 +861,7 @@ public class SessionOrchestrator
             }
             
             // Load the form to validate field IDs
-            var (form, error, fieldIds) = await LoadFormAsync(req, currentState);
+            var (form, error, fieldIds, sectionNames) = await LoadFormAsync(req, currentState);
             if (error != null || form == null)
             {
                 var errorResponse = req.CreateResponse(HttpStatusCode.NotFound);
@@ -938,10 +1006,11 @@ public class SessionOrchestrator
         }
     }
 
-    private async Task<(Form? form, HttpResponseData? errorResponse, String fieldIds)> LoadFormAsync(HttpRequestData req, SessionState? currentState)
+    private async Task<(Form? form, HttpResponseData? errorResponse, String fieldIds, String sectionNames)> LoadFormAsync(HttpRequestData req, SessionState? currentState)
     {
         var form = new Form();
         String fieldIds="";
+        String sectionNames=""; 
         
         if (currentState != null && !string.IsNullOrEmpty(currentState.FormCode))
         {
@@ -954,22 +1023,26 @@ public class SessionOrchestrator
                 string formJson = await _blobStorageService.ReadFileAsync(currentState.FormCode, fileName, FormsContainer);
                 form = JsonSerializer.Deserialize<Form>(formJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
                 fieldIds = string.Join(",", form.Body.Select(f => f.Id));
+                
+                // Extract section names from Badge elements
+                var badges = form.Body.Where(b => b.Type == "Badge" && !string.IsNullOrEmpty(b.Text));
+                sectionNames = string.Join(", ", badges.Select(b => b.Text));
 
             }
             catch (FileNotFoundException ex)
             {
                 var notFound = req.CreateResponse(HttpStatusCode.NotFound);
                 await notFound.WriteStringAsync($"Form not found: {currentState.FormCode}/{fileName} - {ex.Message}");
-                return (null, notFound, null);
+                return (null, notFound, null, null);
             }
             catch (Exception ex)
             {
                 var errorResponse = req.CreateResponse(HttpStatusCode.InternalServerError);
                 await errorResponse.WriteStringAsync($"Error loading form: {ex.Message} | Stack: {ex.StackTrace} | Inner: {ex.InnerException?.Message}");
-                return (null, errorResponse, null);
+                return (null, errorResponse, null, null);
             }
         }        
-        return (form, null, fieldIds);
+        return (form, null, fieldIds,  sectionNames);
     }
 
     private async Task<SessionState?> GetCurrentStateAsync(DurableTaskClient client, string instanceId)

@@ -34,6 +34,9 @@ public class FormField
     [JsonPropertyName("style")]
     public string? Style { get; set; }
 
+    [JsonPropertyName("text")]
+    public string? Text { get; set; }
+
     [JsonPropertyName("codeSnippet")]
     public string? CodeSnippet { get; set; }
 

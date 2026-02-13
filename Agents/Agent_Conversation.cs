@@ -1,18 +1,35 @@
 using System.Text.Json;
 using Microsoft.Extensions.AI;
 using fluid_durable_agent.Models;
+using fluid_durable_agent.Tools;
+using static fluid_durable_agent.Tools.ConversationPromptTemplates;
 
 namespace fluid_durable_agent.Agents;
 
 public class Agent_Conversation
 {
     private readonly Microsoft.Extensions.AI.IChatClient _chatClient;
-    private readonly Agent_CommodityCodeLookup? _commodityCodeLookup;
 
     public Agent_Conversation(Microsoft.Extensions.AI.IChatClient chatClient, Agent_CommodityCodeLookup? commodityCodeLookup = null)
     {
-        _chatClient = chatClient;
-        _commodityCodeLookup = commodityCodeLookup;
+        // If commodity code lookup is provided, wrap the chat client with function calling
+        if (commodityCodeLookup != null)
+        {
+            var commodityTools = new CommodityCodeTools(commodityCodeLookup);
+            var tools = new List<AIFunction>
+            {
+                AIFunctionFactory.Create(commodityTools.LookupCommodityCodeAsync)
+            };
+            
+            _chatClient = chatClient
+                .AsBuilder()
+                .UseFunctionInvocation()
+                .Build();
+        }
+        else
+        {
+            _chatClient = chatClient;
+        }
     }
 
     /// <summary>
@@ -109,50 +126,6 @@ public class Agent_Conversation
             ? string.Join("\n\n", conversationHistory.Select((msg, idx) => $"Message {idx + 1}: {msg}"))
             : "No previous conversation";
 
-        // Check if commodity code is mentioned in the conversation
-        string commodityCodeLookupResult = "";
-        if (_commodityCodeLookup != null)
-        {
-            // Check if "commodity" is mentioned in the conversation history
-            var commodityMentioned = conversationHistory?.Any(msg => 
-                msg.Contains("commodity", StringComparison.OrdinalIgnoreCase)) == true;
-
-            if (commodityMentioned)
-            {
-                // Use the entire completed fields object as context for the lookup
-                var lookupContext = "";
-
-                if (completedFields != null && completedFields.Count > 0)
-                {
-                    // Stringify the completed fields as JSON
-                    lookupContext = JsonSerializer.Serialize(completedFields, new JsonSerializerOptions { WriteIndented = true });
-                }
-                else if (conversationHistory != null && conversationHistory.Count > 0)
-                {
-                    // If no completed fields, use recent conversation as fallback
-                    var recentMessages = conversationHistory.TakeLast(5).ToList();
-                    lookupContext = string.Join(" ", recentMessages);
-                }
-
-                // Perform the lookup if we have context
-                if (!string.IsNullOrWhiteSpace(lookupContext))
-                {
-                    try
-                    {
-                        var lookupResult = await _commodityCodeLookup.LookupCommodityCodeAsync(lookupContext);
-                        if (lookupResult != null && !lookupResult.Code.StartsWith("ERROR"))
-                        {
-                            commodityCodeLookupResult = $"\n\n## COMMODITY CODE LOOKUP RESULT\nBased on the conversation context, I found this commodity code:\n- Code: {lookupResult.Code}\n- Description: {lookupResult.Description}\n\nPresent this code to the user as the answer to their commodity code question.";
-                        }
-                    }
-                    catch (Exception)
-                    {
-                        // Silently fail - the agent can still help without the lookup
-                    }
-                }
-            }
-        }
-
         var prompt = $@"You are a friendly and helpful conversational assistant helping users complete a form. Your role is to guide the conversation naturally while ensuring the form gets completed accurately.
 
 # YOUR RESPONSIBILITIES
@@ -176,13 +149,17 @@ Return a JSON object with the following optional properties. **Only include prop
 - **ValidationConcerns**: (string, optional) Clear explanation of any validation errors or warnings. Since users will see visual indicators on the problematic fields, focus on explaining WHAT needs to be corrected and WHY. Use markdown formatting with paragraph breaks.
 
 - **FinalThoughts**: (string, optional) Conversational text to guide the user forward:
-  - Ask the question for the next logical field to complete (work from top down)
-  - If user presents information out of order, acknowledge briefly but guide them to the next field from the top
   - Occasioinally Provide encouraging words about their progress (not every time)
+  - If the user indicates that they would like to skip the current question or field, acknowledge that and suggest the next logical field to complete
+  - Ask the question related to the next logical field to complete
+  - If user presents information out of order, acknowledge briefly but guide them to the next field from the top
   - When you draft content, mention it's ready to review but don't rehash the drafted value
   - Avoid mentioning ""required field"" when there are plenty of fields left to complete
   - When mentioning fields, use the field **label** in bold
   - Use markdown formatting with paragraph breaks for readability
+  - Never wait for the user to say what they want to complete next. Take charge and suggest the next field to complete unless the user is asking a question
+  - If the user is asking what to do  next, provide the next field question
+  - Special guidance: When a field that you are working with has a decision tree and the customer indicates that they need help, walk them trough the tree
 
 - **DraftedField**: (object with fieldName and value) 
   - When user asks for help creating text or a suggestion for a specific field
@@ -191,12 +168,6 @@ Return a JSON object with the following optional properties. **Only include prop
   - The fieldName should correspond to the relevant field in the form
 
 - **FieldFocus**: (string, optional) The field ID of the next logical field to focus on. Consider required fields, logical flow, dependencies, and user's current context.
-
-- **ResponseOptions**: (array of strings, optional) When asking about the next field, if that field has choices or allows N/A:
-  - Include all available choice titles/values from the field's choices array
-  - If the field has na_option set to true, add ""N/A"" or ""Not Applicable"" as an option
-  - Only provide this when you're asking the user about a specific field that has predefined options
-  - Present options in a clear, user-friendly format
 
 # FORMATTING GUIDELINES
 
@@ -229,14 +200,6 @@ Example 3 - Smooth progress:
   ""FieldFocus"": ""requester_name""
 }}
 
-Example 5 - Field with choice options:
-{{
-  ""AcknowledgeInputs"": ""Thanks for providing the project details!"",
-  ""FinalThoughts"": ""Does this project connect to the state network or infrastructure?"",
-  ""FieldFocus"": ""connectsToStateNetwork"",
-  ""ResponseOptions"": [""Yes"", ""No"", ""Not Applicable""]
-}}
-
 Example 4 - Draft responses:
 {{
   ""FinalThoughts"": ""Sure! Based on what I know thus far, I have drafted a problem statement for you to review."",
@@ -247,14 +210,14 @@ Example 4 - Draft responses:
   }}
 }}
 
-# COMMODITY CODE LOOKUP
+# TOOLS AVAILABLE
 
-When a field requires a commodity code (look for field IDs like 'commodityCode', 'nigp_code', or labels mentioning commodity/NIGP codes):
-- If you see a COMMODITY CODE LOOKUP RESULT section below, use that EXACT code and description
-- Present the code to the user in your FinalThoughts
-- You can include it as a DraftedField with the code as the value
-- DO NOT make up or guess commodity codes - ONLY use codes from the COMMODITY CODE LOOKUP RESULT section if present
-- If no COMMODITY CODE LOOKUP RESULT is provided, tell the user you need more product/service information to look up the code
+You have access to a commodity code lookup tool:
+- **LookupCommodityCodeAsync**: Use this when the user asks about commodity codes or NIGP codes
+- Input: A description of the product/service (use the completed fields JSON string as context)
+- Output: Returns a commodity code and description
+- When to use: When user mentions ""commodity code"", or asks what code to use for their procurement
+- After getting a result, present it to the user and include it as a DraftedField with the appropriate fieldName
 
 # IMPORTANT NOTES
 - Pay close attention to form specific instructions found in a code block within the FORM FIELDS. They should be considered an override if any conflicts between them and these general instructions exist.
@@ -284,7 +247,6 @@ The user is currently looking at this field (may be relevant if they ask a quest
 
 ## VALIDATION RESULTS
 {validationInfo}
-{commodityCodeLookupResult}
 #END OF PROMPT";
 
         var messages = new List<Microsoft.Extensions.AI.ChatMessage>
@@ -293,34 +255,55 @@ The user is currently looking at this field (may be relevant if they ask a quest
         };
 
         var content = "";
+        const int maxAttempts = 3;
         
-        try
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            var response = await _chatClient.GetResponseAsync(messages, cancellationToken: default);
-            content = response?.Text ?? "{}";
-            
-            var conversationResponse = JsonSerializer.Deserialize<ConversationResponse>(content, 
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            return conversationResponse ?? new ConversationResponse();
-        }
-        catch (JsonException)
-        {
-            // If parsing fails, try to extract JSON from the response
-            var jsonStart = content.IndexOf('{');
-            var jsonEnd = content.LastIndexOf('}');
-            if (jsonStart >= 0 && jsonEnd > jsonStart)
+            try
             {
-                var jsonContent = content.Substring(jsonStart, jsonEnd - jsonStart + 1);
-                var conversationResponse = JsonSerializer.Deserialize<ConversationResponse>(jsonContent,
+                var response = await _chatClient.GetResponseAsync(messages, cancellationToken: default);
+                content = response?.Text ?? "{}";
+                
+                var conversationResponse = JsonSerializer.Deserialize<ConversationResponse>(content, 
                     new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
                 return conversationResponse ?? new ConversationResponse();
             }
-            
-            // Fallback response
-            return new ConversationResponse
+            catch (JsonException)
             {
-                FinalThoughts = "I'm here to help you complete this form. Please let me know what information you'd like to provide next."
-            };
+                // If parsing fails, try to extract JSON from the response
+                var jsonStart = content.IndexOf('{');
+                var jsonEnd = content.LastIndexOf('}');
+                if (jsonStart >= 0 && jsonEnd > jsonStart)
+                {
+                    var jsonContent = content.Substring(jsonStart, jsonEnd - jsonStart + 1);
+                    try
+                    {
+                        var conversationResponse = JsonSerializer.Deserialize<ConversationResponse>(jsonContent,
+                            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                        return conversationResponse ?? new ConversationResponse();
+                    }
+                    catch (JsonException)
+                    {
+                        // If this is not the last attempt, continue to retry
+                        if (attempt < maxAttempts)
+                        {
+                            continue;
+                        }
+                    }
+                }
+                
+                // If this is not the last attempt, retry
+                if (attempt < maxAttempts)
+                {
+                    continue;
+                }
+            }
         }
+        
+        // Fallback response after all retry attempts exhausted
+        return new ConversationResponse
+        {
+            FinalThoughts = "I'm here to help you complete this form. Please let me know what information you'd like to provide next."
+        };
     }
 }

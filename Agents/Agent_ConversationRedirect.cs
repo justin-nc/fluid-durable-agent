@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.Extensions.AI;
 using fluid_durable_agent.Models;
+using static fluid_durable_agent.Tools.ConversationPromptTemplates;
 
 namespace fluid_durable_agent.Agents;
 
@@ -24,7 +25,8 @@ public class Agent_ConversationRedirect
     public async Task<ConversationResponse> GenerateRedirectResponseAsync(
         Form form,
         Dictionary<string, FieldValue>? completedFields = null,
-        string? focusFieldId = null)
+        string? focusFieldId = null,
+        bool distraction_detected = true)
     {
         if (form?.Body == null || form.Body.Count == 0)
         {
@@ -76,7 +78,11 @@ public class Agent_ConversationRedirect
             }
         }
 
-        var prompt = $@"You are a friendly and encouraging conversational assistant helping users complete a form. The user has gotten distracted or off-topic, and you need to gently redirect them back to completing the form.
+        string promptContext = distraction_detected
+            ? "The user appears to be distracted or off-topic. Your goal is to gently redirect them back to completing the form while being encouraging and positive."
+            : "The user needs help getting back to completing the form. Present the next logical step in a friendly and encouraging way.";
+        var prompt = $@"You are a friendly and encouraging conversational assistant helping users complete a form.
+        {promptContext}
 
 # YOUR RESPONSIBILITIES
 
@@ -95,16 +101,13 @@ Return a JSON object with the following properties:
   - Identifies the next logical field to complete (start from top, move down)
   - Asks the question for that next field in a natural, conversational way
   - Uses markdown formatting with paragraph breaks for readability
+  - If the next question is open ended (not a choice field), ask the question related to the next logical field to complete.
+  - If the next question has choices, **DO NOT incorporate the question into FinalThoughts.** Providing the field focus and response options is sufficient. Immediately following your final thought, the user will be presented with the question and options. 
 
 - **FieldFocus**: (string, optional) The field ID of the next logical field to focus on. Choose based on:
   - Fields that haven't been completed yet
   - Start from the top of the form and work down logically
   - Required fields take priority
-
-- **ResponseOptions**: (array of strings, optional) When asking about the next field, if that field has choices or allows N/A:
-  - Include all available choice titles/values from the field's choices array
-  - If the field has na_option set to true, add ""N/A"" or ""Not Applicable"" as an option
-  - Only provide this when you're asking the user about a specific field that has predefined options
 
 # FORMATTING GUIDELINES
 
@@ -136,13 +139,6 @@ Example 3 - With progress acknowledgment:
   ""FieldFocus"": ""businessCase""
 }}}}
 
-Example 4 - Field with choice options:
-{{{{
-  ""FinalThoughts"": ""I understand! Let's focus on getting this form completed for you.\\n\\nDoes this procurement involve software?"",
-  ""FieldFocus"": ""includesSoftware"",
-  ""ResponseOptions"": [""Yes"", ""No"", ""Not Applicable""]
-}}}}
-
 # IMPORTANT NOTES
 - Do NOT answer off-topic questions directly
 - Stay focused on redirecting to form completion
@@ -171,40 +167,57 @@ Return ONLY valid JSON matching the structure above.
         };
 
         var content = "";
+        const int maxAttempts = 3;
         
-        try
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            var response = await _chatClient.GetResponseAsync(messages, cancellationToken: default);
-            content = response?.Text ?? "{{}}";
-            
-            var conversationResponse = JsonSerializer.Deserialize<ConversationResponse>(content, 
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            return conversationResponse ?? new ConversationResponse
+            try
             {
-                FinalThoughts = "I'm here to help you complete this form. Let's get back on track!"
-            };
-        }
-        catch (JsonException)
-        {
-            // If parsing fails, try to extract JSON from the response
-            var jsonStart = content.IndexOf('{');
-            var jsonEnd = content.LastIndexOf('}');
-            if (jsonStart >= 0 && jsonEnd > jsonStart)
-            {
-                var jsonContent = content.Substring(jsonStart, jsonEnd - jsonStart + 1);
-                var conversationResponse = JsonSerializer.Deserialize<ConversationResponse>(jsonContent,
+                var response = await _chatClient.GetResponseAsync(messages, cancellationToken: default);
+                content = response?.Text ?? "{{}}";
+                
+                var conversationResponse = JsonSerializer.Deserialize<ConversationResponse>(content, 
                     new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                return conversationResponse ?? new ConversationResponse
+                if (conversationResponse != null)
                 {
-                    FinalThoughts = "I'm here to help you complete this form. Let's get back on track!"
-                };
+                    return conversationResponse;
+                }
+            }
+            catch (JsonException)
+            {
+                // If parsing fails, try to extract JSON from the response
+                var jsonStart = content.IndexOf('{');
+                var jsonEnd = content.LastIndexOf('}');
+                if (jsonStart >= 0 && jsonEnd > jsonStart)
+                {
+                    var jsonContent = content.Substring(jsonStart, jsonEnd - jsonStart + 1);
+                    try
+                    {
+                        var conversationResponse = JsonSerializer.Deserialize<ConversationResponse>(jsonContent,
+                            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                        if (conversationResponse != null)
+                        {
+                            return conversationResponse;
+                        }
+                    }
+                    catch (JsonException)
+                    {
+                        // Continue to next attempt
+                    }
+                }
             }
             
-            // Fallback response
-            return new ConversationResponse
+            // If this isn't the last attempt, continue to retry
+            if (attempt < maxAttempts)
             {
-                FinalThoughts = "I'm here to help you complete this form. Let's get back on track!"
-            };
+                continue;
+            }
         }
+        
+        // Fallback response after all attempts exhausted
+        return new ConversationResponse
+        {
+            FinalThoughts = "I'm here to help you complete this form. Let's get back on track!"
+        };
     }
 }

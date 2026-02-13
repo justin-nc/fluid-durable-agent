@@ -3,31 +3,37 @@ POST http://localhost:7071/api/session
 Content-Type: application/json
 
 {
-  "FormCode": "pronav"
+  "FormCode": "pronav",
+  "FormData" :  {
+    
+  }
 }
 
 ###
 @instanceId = {{createSession.response.body.instanceId}}
 
+####@instanceId=109b6cc0514740b8b99ada02da3a9d75
+
 ####
 
-
 POST http://localhost:7071/api/session/{{instanceId}}/message
 
+/init This procurement is for a new virtual machine hosting platform.  We don't currently have 
+such a system and our customers desperately need it. Our customers need a way to host virtual machines in a secure and scalable environment, and this new platform will provide that capability. The budget is around $1.00 and we need it by the end of Q3 this year.
 We will be seeking a HUB vendor.  We have already reached out to several of them to find out who can provide this.
-I'm john doe; j.doe@nc.gov and the project owner is Joe Smith; joe.smith@nc.gov
-This procurement is for a new software platform to host virtual machines.  We don't currently have 
-such a system and our customers desperately need it.  The budget is around $250,000 and we need it by the end of Q3 2026
+The project owner is Joe Smith; joe.smith@nc.gov. We have not done any market research yet, so any recommendations would be helpful.
+The project must start on 1/1/2025.
+
+###
+
+POST http://localhost:7071/api/session/{{instanceId}}/message
+
+can you help me create this?
 
 ###
 POST http://localhost:7071/api/session/{{instanceId}}/message
 
-NC Department of Information Technology.
-
-###
-POST http://localhost:7071/api/session/{{instanceId}}/message
-
-
+Cloud Application Hosting Service
 
 ###
 POST http://localhost:7071/api/session/{{instanceId}}/fields
@@ -59,7 +65,21 @@ POST http://localhost:7071/api/session/{{instanceId}}/fields
 GET http://localhost:7071/api/session/{{instanceId}}/fields
 
 ###
+# @name generateToken
+POST http://localhost:7071/api/session/{{instanceId}}/token
 
+
+###
+
+@updateurl = {{generateToken.response.body.updateUrl}}
+
+
+POST  http://localhost:7071{{updateurl}}?code={{code}}
+
+{  "NewFieldValues": [ { "fieldName": "touchdown_proposedEndDate", "value": "12/21/2026" } ] }
+
+
+####
 POST /api/session/{instanceId}/token
 
 # Response:

@@ -1,0 +1,22 @@
+Focus Fields with options aren't always rendering options
+
+    {
+    "status": "fields_updated",
+    "newFieldValues": [
+        {
+        "fieldName": "commodityCode",
+        "value": "81111500 \u2013 Application Hosting Services (UNSPSC)",
+        "note": "AI-drafted content",
+        "drafted": true
+        }
+    ],
+    "acknowledgeInputs": "Got it! I\u2019ll find the right commodity code for the **Product or Service** you entered.",
+    "finalThoughts": "I\u2019ve added the UNSPSC code **81111500** for **Application Hosting Services**. Let me know if that looks good, or if you\u2019d like to adjust it.\n\nOnce you confirm, we can move on to the next section\u2014**Is a one\u2011time budget required?**",
+    "fieldFocus": "td_qualifier_oneTimeBudgetRequired"
+    }
+
+
+commodityCode field should only be a number
+
+
+

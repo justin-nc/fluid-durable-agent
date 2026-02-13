@@ -7,6 +7,7 @@ using fluid_durable_agent.Models;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Linq;
+using static fluid_durable_agent.Tools.ConversationPromptTemplates;
 
 namespace fluid_durable_agent.Agents;
 
@@ -22,11 +23,11 @@ public class Agent_FieldCompletion
     /// <summary>
     /// Analyzes a user message against form fields to extract field values
     /// </summary>
-    /// <param name="userMessage">The user's chat message</param>
+    /// <param name="priorDialog">The user's chat message</param>
     /// <param name="form">The form containing fields to check against</param>
     /// <param name="completedFields">List of fields that have already been completed</param>
     /// <returns>List of extracted form field values</returns>
-    public async Task<List<FormFieldValue>> ExtractFieldValuesAsync(string userMessage, Form form, Dictionary<string, FieldValue>? completedFields = null)
+    public async Task<List<FormFieldValue>> ExtractFieldValuesAsync(List<String> priorDialog, Form form, Dictionary<string, FieldValue>? completedFields = null, bool  anticipateBulkCompletion = false)
     {
         if (form?.Body == null || form.Body.Count == 0)
         {
@@ -49,24 +50,10 @@ public class Agent_FieldCompletion
         }).ToList();
         
         var fieldsInfo = JsonSerializer.Serialize(fieldsInfoObject, new JsonSerializerOptions { WriteIndented = true });
-
-        // Build completed fields information as JSON if present
-        var completedFieldsInfo ="[]";
-        if (completedFields != null && completedFields.Count > 0)
-        {
-            var completedFieldsObject = completedFields.Select(kvp => new
-            {
-                fieldId = kvp.Key,
-                value = kvp.Value.Value?.ToString() ?? "",
-                note = kvp.Value.Note
-            }).ToList();
-            
-            completedFieldsInfo = JsonSerializer.Serialize(completedFieldsObject, new JsonSerializerOptions { WriteIndented = true });
-        }
+        var priorDialogString=string.Join("\n", priorDialog);  
 
        var prompt = $@"You are the transcriber for an intelligent form completion assistant which is helping a user who is interacting with form fields as well as directly chatting.  
 Your job is to process user input and determine what fields can be completed as a result of their latest response.  
-You validate that the information that the user has provided is valid before completing a field.  If the input is invalid, you provide a friendly statement as such in the inputError field.
 You only provide the field completions for values that need to be changed or new values.
 If a user doesn't explicitly answer a question, but the answer can be inferred, complete the value but be sure to set 'inferred' to 'true'.
 Occasionally, especially when the field is Multiline, the user will ask for your help drafting a response.  In these cases, use your general understanding of the topic as well as field_completions and prior_dialog to help create text.
@@ -92,9 +79,7 @@ Occasionally, especially when the field is Multiline, the user will ask for your
 - 'isRequired': Indicates the field is required when not conditional or when the condition is met.
 - 'choices': Options that must be used to complete this field (if applicable). If the field is a choice set and the user's response does not align with one of the choices, ask the question again.
 - 'isMultiline': Indicates the field could be a paragraph or more of text. A single-word answer is not sufficient unless the response is ""N/A"" and 'na_option' is true.
-- 'note': Contains important information about the field, including validation requirements.
-
-## user_data - JSON Information about the user completing the form, also known as the requester. That should be used to automatically fill fields like requester_name, requester_email, etc.
+- 'note': Contains important information about the field which may be helpful when determining how to complete the field based on user input. This could include instructions, definitions, or other relevant details.
 
 ## values - a JSON list of FIELD_VALUES that have been completed thus far.
 
@@ -106,6 +91,9 @@ Return ONLY a JSON object mapping field IDs to extracted values.
 Format: 
 Only include fields where you found relevant information in the user message.
 For choice fields, ensure the value matches one of the valid choices.
+Dates should be in MM/DD/YYYY format.  If the user provides a date in a different format, convert it to MM/DD/YYYY.  If you cannot determine a valid date, do not provide a value for the field.
+In order to complete a yes/no question, the user must explicitly state something that would directly indicate yes or no.  Do not infer a ""no"" based on absence of information.
+Return all values (even number fields) as strings.  Do not attempt to return numeric values as numbers.
 If no fields can be populated, return an empty object: {{}}
 
 #Expected Output (JSON):
@@ -120,40 +108,75 @@ An array of FIELD_VALUES that are completed based on the latest user input.  THI
 **** INPUTS  ****
 
 #prior_dialog
-{userMessage}
+{priorDialogString}
 
-#field_completions (prior to this call):
-{completedFieldsInfo}
+#important context
+{TodayDateContext}
 
-";
+#field_completions (prior to this call):";
 
-        var messages = new List<Microsoft.Extensions.AI.ChatMessage>
-        {
-            new(Microsoft.Extensions.AI.ChatRole.User, prompt)
-        };
+  
 
-        // Try up to 3 times to extract field values with 200ms delay between attempts
-        int maxAttempts = 3;
+        // Try up to 5 times to extract field values with 200ms delay between attempts
+        List<FormFieldValue> extractedValues = new List<FormFieldValue>();
+        int maxAttempts = 5;
         for (int attempt = 0; attempt < maxAttempts; attempt++)
         {
             var content = "";
             try
             {
+                // Build completed fields information as JSON if present
+                var completedFieldsInfo = BuildCompletedFieldsJson(completedFields);
+                var executePrompt=prompt +completedFieldsInfo;
+                var messages = new List<Microsoft.Extensions.AI.ChatMessage>
+                {
+                    new(Microsoft.Extensions.AI.ChatRole.User, executePrompt)
+                };
                 var response = await _chatClient.GetResponseAsync(messages, cancellationToken: default);
                 content = response?.Text ?? "{}";       
                 var responseWrapper = JsonSerializer.Deserialize<List<FormFieldValue>>(content, 
                     new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
                 
-                // If we got results, return them
-                if (responseWrapper != null && responseWrapper.Count > 0)
+                // If we got results, aggregate them
+                if (responseWrapper != null && responseWrapper.Count > 0)                
                 {
-                    return responseWrapper;
+                    // Always aggregate new values into extractedValues
+                    foreach (var newValue in responseWrapper)
+                    {
+                        // Only add if not already present (based on fieldName)
+                        if (!extractedValues.Any(ev => ev.FieldName == newValue.FieldName))
+                        {
+                            extractedValues.Add(newValue);
+                            
+                            // Add to completedFields as well
+                            if (completedFields != null && !string.IsNullOrEmpty(newValue.FieldName))
+                            {
+                                completedFields[newValue.FieldName] = new FieldValue
+                                {
+                                    Value = newValue.Value,
+                                    Note = newValue.Note
+                                };
+                            }
+                        }
+                    }
+                    
+                    // If bulk completion is anticipated and we have less than 5 values, allow retry
+                    if (anticipateBulkCompletion && extractedValues.Count < 5 && priorDialog.Last().Length > 75)
+                    {
+                        await Task.Delay(200);
+                        // Continue to next attempt
+                    }
+                    else
+                    {
+                        // Return aggregated values
+                        return extractedValues;
+                    }
                 }
                 
                 // If no results and this is the last attempt, return empty list
                 if (attempt == maxAttempts - 1)
                 {
-                    return new List<FormFieldValue>();
+                    return extractedValues;
                 }
             }
             catch (JsonException)
@@ -206,70 +229,7 @@ An array of FIELD_VALUES that are completed based on the latest user input.  THI
         public string? InputError { get; set; }
     }
 
-    /// <summary>
-    /// Validates extracted field values against form field rules
-    /// </summary>
-    /// <param name="extractedValues">The extracted field values</param>
-    /// <param name="form">The form containing validation rules</param>
-    /// <returns>Dictionary of validated field values</returns>
-    public Dictionary<string, string> ValidateFieldValues(Dictionary<string, string> extractedValues, Form form)
-    {
-        var validatedFields = new Dictionary<string, string>();
-
-        foreach (var kvp in extractedValues)
-        {
-            var field = form.Body.FirstOrDefault(f => f.Id == kvp.Key);
-            if (field == null)
-                continue;
-
-            var value = kvp.Value;
-
-            // Validate choice fields
-            if (field.Choices != null && field.Choices.Count > 0)
-            {
-                var matchingChoice = field.Choices.FirstOrDefault(c => 
-                    c.Value.Equals(value, StringComparison.OrdinalIgnoreCase) ||
-                    c.Title.Equals(value, StringComparison.OrdinalIgnoreCase));
-                
-                if (matchingChoice != null)
-                {
-                    validatedFields[kvp.Key] = matchingChoice.Value;
-                }
-                // Skip invalid choice values
-                continue;
-            }
-
-            // For text fields, just pass through
-            if (field.Type == "Input.Text")
-            {
-                validatedFields[kvp.Key] = value;
-            }
-            // For date fields, validate format (basic check)
-            else if (field.Type == "Input.Date")
-            {
-                if (DateTime.TryParse(value, out _))
-                {
-                    validatedFields[kvp.Key] = value;
-                }
-            }
-            // For number fields, validate numeric
-            else if (field.Type == "Input.Number")
-            {
-                if (decimal.TryParse(value, out _))
-                {
-                    validatedFields[kvp.Key] = value;
-                }
-            }
-            else
-            {
-                // Default: include the value
-                validatedFields[kvp.Key] = value;
-            }
-        }
-
-        return validatedFields;
-    }
-
+    
     /// <summary>
     /// Analyzes a user message and returns validated field values
     /// </summary>
@@ -277,10 +237,9 @@ An array of FIELD_VALUES that are completed based on the latest user input.  THI
     /// <param name="form">The form to analyze against</param>
     /// <param name="completedFields">List of fields that have already been completed</param>
     /// <returns>Dictionary of validated field IDs and values</returns>
-    public async Task<List<FormFieldValue>> AnalyzeMessageAsync(string userMessage, Form form, Dictionary<string, FieldValue>? completedFields = null)
+    public async Task<List<FormFieldValue>> AnalyzeMessageAsync(List<string> priorDialog, Form form, Dictionary<string, FieldValue>? completedFields = null)
     {
-        var extractedValues = await ExtractFieldValuesAsync(userMessage, form, completedFields);
-       // var validatedValues = ValidateFieldValues(extractedValues, form);
+        var extractedValues = await ExtractFieldValuesAsync(priorDialog, form, completedFields);
         return extractedValues;
     }
 
@@ -340,6 +299,28 @@ An array of FIELD_VALUES that are completed based on the latest user input.  THI
 ]
 
 
-[]";
+[]
+";
 
+    /// <summary>
+    /// Builds a JSON string representation of completed fields
+    /// </summary>
+    /// <param name="completedFields">Dictionary of completed field values</param>
+    /// <returns>JSON string of completed fields</returns>
+    private static string BuildCompletedFieldsJson(Dictionary<string, FieldValue>? completedFields)
+    {
+        if (completedFields == null || completedFields.Count == 0)
+        {
+            return "[]";
+        }
+
+        var completedFieldsObject = completedFields.Select(kvp => new
+        {
+            fieldId = kvp.Key,
+            value = kvp.Value.Value?.ToString() ?? "",
+            note = kvp.Value.Note
+        }).ToList();
+        
+        return JsonSerializer.Serialize(completedFieldsObject, new JsonSerializerOptions { WriteIndented = true });
+    }
 }
