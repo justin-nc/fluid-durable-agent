@@ -567,8 +567,12 @@ public class SessionOrchestrator
         string instanceId,
         [DurableClient] DurableTaskClient client)
     {
-        // Get current state
-        SessionState? currentState = await GetCurrentStateAsync(client, instanceId);
+        // Get and validate current state
+        var (currentState, errorResponse) = await GetValidatedStateAsync(client, instanceId, req);
+        if (errorResponse != null)
+        {
+            return errorResponse;
+        }
         
         if (currentState == null)
         {
@@ -721,7 +725,13 @@ public class SessionOrchestrator
         try
         {
             // Get current state to validate the instance exists
-            SessionState? currentState = await GetCurrentStateAsync(client, instanceId);
+            // Get and validate current state
+            var (currentState, errorResponse) = await GetValidatedStateAsync(client, instanceId, req);
+            if (errorResponse != null)
+            {
+                return errorResponse;
+            }
+
             if (currentState == null)
             {
                 var notFound = req.CreateResponse(HttpStatusCode.NotFound);
@@ -1192,6 +1202,7 @@ public class SessionOrchestrator
             }
             else
             {
+
                 // Create a new orchestration instance with the current state
                 newInstanceId = await client.ScheduleNewOrchestrationInstanceAsync(
                     OrchestratorName,
