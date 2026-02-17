@@ -11,6 +11,8 @@ using Microsoft.DurableTask.Client;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using fluid_durable_agent.Tools;
 using fluid_durable_agent.Services;
 
@@ -29,23 +31,38 @@ var taskHubName = Environment.GetEnvironmentVariable("TASKHUB_NAME") ?? "default
 
 
 var builder = FunctionsApplication.CreateBuilder(args);
+
 // Register BlobStorageService first so it can be used by other services
 builder.Services.AddSingleton<BlobStorageService>();
 
-// Create an AI agent following the standard Microsoft Agent Framework pattern
+// Create tools
 FormFieldTools formFieldTools = new();
 DeterministicPromptTools deterministicPromptTools = new();
 
-// Create commodity code lookup agent first
+// Create a minimal configuration for BlobStorageService used in tools
+var configBuilder = new ConfigurationBuilder();
+configBuilder.AddInMemoryCollection(new Dictionary<string,string?>
+{
+    ["BlobStorageConnectionString"] = Environment.GetEnvironmentVariable("BlobStorageConnectionString"),
+    ["BlobStorageContainerName"] = "documents"
+});
+var tempConfig = configBuilder.Build();
+
+// Create commodity code lookup agent instance for tools
 var commodityCodeLookupChatClient = new AzureOpenAIClient(new Uri(endpoint), new AzureKeyCredential(key))
-    .GetChatClient(lightweightDeployment)
+    .GetChatClient(commodityCodeLookupDeployment)
     .AsIChatClient();
-var blobStorageServiceForTools = new BlobStorageService(builder.Configuration);
-var commodityCodeLookupAgent = new fluid_durable_agent.Agents.Agent_CommodityCodeLookup(
-    commodityCodeLookupChatClient, 
-    blobStorageServiceForTools, 
-    null!); // Logger will be null for tools instance
-var commodityCodeTools = new fluid_durable_agent.Tools.CommodityCodeTools(commodityCodeLookupAgent);
+
+// Create a simple logger factory for the agent used in tools
+using var loggerFactory = LoggerFactory.Create(b => b.AddConsole().SetMinimumLevel(LogLevel.Warning));
+var commodityLogger = loggerFactory.CreateLogger<fluid_durable_agent.Agents.Agent_CommodityCodeLookup>();
+
+var blobStorageForTools = new BlobStorageService(tempConfig);
+var commodityCodeTools = new fluid_durable_agent.Tools.CommodityCodeTools(
+    new fluid_durable_agent.Agents.Agent_CommodityCodeLookup(
+        commodityCodeLookupChatClient, 
+        blobStorageForTools,
+        commodityLogger));
 
 AIAgent agent = new AzureOpenAIClient(new Uri(endpoint), new AzureKeyCredential(key))
     .GetChatClient(deploymentName)
@@ -62,8 +79,6 @@ AIAgent agent = new AzureOpenAIClient(new Uri(endpoint), new AzureKeyCredential(
             AIFunctionFactory.Create(deterministicPromptTools.BuildPromptFromJson),
             AIFunctionFactory.Create(commodityCodeTools.LookupCommodityCodeAsync)
         ]);
-
-
 
 builder.ConfigureFunctionsWebApplication();
 
@@ -132,7 +147,6 @@ builder.Services.AddSingleton<fluid_durable_agent.Agents.Agent_CommodityCodeLook
     var logger = sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<fluid_durable_agent.Agents.Agent_CommodityCodeLookup>>();
     return new fluid_durable_agent.Agents.Agent_CommodityCodeLookup(chatClient, blobStorageService, logger);
 });
-
 
 // Configure Durable Task Client to use DTS backend
 builder.Services.AddDurableTaskClient(clientBuilder =>

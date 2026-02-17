@@ -9,6 +9,7 @@ using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
 using Microsoft.DurableTask;
 using Microsoft.DurableTask.Client;
+using Microsoft.DurableTask.Entities;
 using Microsoft.Extensions.Logging;
 using fluid_durable_agent.Models;
 using fluid_durable_agent.Services;
@@ -52,7 +53,11 @@ public class SessionOrchestrator
     {
         ILogger logger = context.CreateReplaySafeLogger(nameof(SessionOrchestrator));
         var state = context.GetInput<SessionState>() ?? new SessionState();
-        state.History ??= new List<string>();
+        
+        // Get entity IDs for this session
+        var instanceId = context.InstanceId;
+        var historyEntityId = new EntityInstanceId(nameof(SessionHistoryEntity), instanceId);
+        var fieldsEntityId = new EntityInstanceId(nameof(FormFieldsEntity), instanceId);
 
         while (true)
         {            
@@ -78,20 +83,28 @@ public class SessionOrchestrator
                     
                     if (messageData != null)
                     {
-                        // Add all messages to history
+                        // Add all messages to history entity via activity
                         if (messageData.Messages != null && messageData.Messages.Count > 0)
                         {
-                            foreach (var msg in messageData.Messages)
-                            {
-                                state.History.Add(msg);
-                            }
+                            await context.CallActivityAsync(nameof(UpdateHistoryActivity), 
+                                new { InstanceId = instanceId, Messages = messageData.Messages });
                             state.NewMessage = messageData.Messages[messageData.Messages.Count - 1];
                         }
                         
-                        // Update field completions if provided
+                        // Update field completions in entity if provided
                         if (messageData.FieldCompletions != null && messageData.FieldCompletions.Count > 0)
                         {
-                            state.CompletedFieldValues = messageData.FieldCompletions;                          
+                            // Convert FieldValue to FormFieldValue for entity storage
+                            var formFieldValues = messageData.FieldCompletions
+                                .Select(kvp => new FormFieldValue
+                                {
+                                    FieldName = kvp.Key,
+                                    Value = kvp.Value.Value,
+                                    Note = kvp.Value.Note
+                                })
+                                .ToDictionary(f => f.FieldName!, f => f);
+                            await context.CallActivityAsync(nameof(UpdateFieldsActivity), 
+                                new { InstanceId = instanceId, Fields = formFieldValues });
                         }
                     }
                     break;
@@ -102,19 +115,34 @@ public class SessionOrchestrator
                     
                     if (formActionData != null)
                     {
-                        // Add messages to history if provided
+                        // Add messages to history entity if provided via activity
                         if (formActionData.Messages != null && formActionData.Messages.Count > 0)
                         {
-                            foreach (var msg in formActionData.Messages)
-                            {
-                                state.History.Add(msg);
-                            }
+                            await context.CallActivityAsync(nameof(UpdateHistoryActivity), 
+                                new { InstanceId = instanceId, Messages = formActionData.Messages });
                         }
                         
-                        // Update field values if provided
+                        // Update field values in entity if provided
                         if (formActionData.NewFieldValues != null && formActionData.NewFieldValues.Count > 0)
                         {
-                            UpdateFieldValues(state, formActionData.NewFieldValues, "(Updated via form_action)");
+                            var fieldsDict = formActionData.NewFieldValues
+                                .Where(f => !string.IsNullOrEmpty(f.FieldName))
+                                .Select(f => {
+                                    var inferredNote = f.Inferred == true ? " (Inferred)" : "";
+                                    var draftedNote = f.Drafted == true ? " (Drafted)" : "";
+                                    var note = $"{f.Note}(Updated via form_action){inferredNote}{draftedNote}";
+                                    return new FormFieldValue
+                                    {
+                                        FieldName = f.FieldName,
+                                        Value = f.Value,
+                                        Note = note,
+                                        Inferred = f.Inferred,
+                                        Drafted = f.Drafted
+                                    };
+                                })
+                                .ToDictionary(f => f.FieldName!, f => f);
+                            await context.CallActivityAsync(nameof(UpdateFieldsActivity), 
+                                new { InstanceId = instanceId, Fields = fieldsDict });
                         }
                     }
 
@@ -151,15 +179,6 @@ public class SessionOrchestrator
             }
             
             context.SetCustomStatus(state);
-            
-            // Only use ContinueAsNew to trim history when it gets too large
-            if (state.History.Count >= 100)
-            {
-                // Keep only the last 50 messages
-                state.History = state.History.Skip(state.History.Count - 50).ToList();
-                context.ContinueAsNew(state);
-                return state; // Return the state when restarting
-            }
         }
     }
 
@@ -207,28 +226,33 @@ public class SessionOrchestrator
                 return badRequest;
             }
 
-            // Process FormData if provided - convert Dictionary<string, string> to Dictionary<string, FieldValue>
-            var completedFieldValues = new Dictionary<string, FieldValue>();
-            if (startRequest.FormData != null)
-            {
-                foreach (var kvp in startRequest.FormData)
-                {
-                    completedFieldValues[kvp.Key] = new FieldValue
-                    {
-                        Value = JsonSerializer.SerializeToElement(kvp.Value)
-                    };
-                }
-            }
-
+            // Create orchestration instance
             string instanceId = await client.ScheduleNewOrchestrationInstanceAsync(
                 OrchestratorName,
                 new SessionState 
                 { 
                     FormCode = startRequest.FormCode, 
-                    Version = startRequest.Version, 
-                    History = new List<string>(),
-                    CompletedFieldValues = completedFieldValues
+                    Version = startRequest.Version
                 });
+            
+            // Initialize entities if FormData is provided
+            if (startRequest.FormData != null && startRequest.FormData.Count > 0)
+            {
+                var fieldsEntityId = new EntityInstanceId(nameof(FormFieldsEntity), instanceId);
+                var formFieldValues = new Dictionary<string, FormFieldValue>();
+                
+                foreach (var kvp in startRequest.FormData)
+                {
+                    formFieldValues[kvp.Key] = new FormFieldValue
+                    {
+                        FieldName = kvp.Key,
+                        Value = JsonSerializer.SerializeToElement(kvp.Value)
+                    };
+                }
+                
+                await client.Entities.SignalEntityAsync(fieldsEntityId, "SetAll", formFieldValues);
+            }
+            
             HttpResponseData response = req.CreateResponse(HttpStatusCode.Accepted);
             response.Headers.Add("Content-Type", "application/json");
             var responseObj = new { instanceId = instanceId, formCode = startRequest.FormCode, version = startRequest.Version };
@@ -316,7 +340,12 @@ public class SessionOrchestrator
                 formContext = JsonSerializer.Serialize(form, new JsonSerializerOptions { WriteIndented = false });
             }
             
-            var priorMessages = currentState.History ?? new List<string>();
+            // Get history from entity
+            var priorMessages = await GetHistoryFromEntityAsync(client, instanceId);
+            
+            // Get field values from entity
+            var completedFieldValues = await GetFieldValuesFromEntityAsync(client, instanceId);
+            
             bool jumpToConversation = false; // This can be set based on certain conditions in the message evaluation if needed
             if (body.Trim().Length ==0 || chat_command == "next")
             {
@@ -359,7 +388,7 @@ public class SessionOrchestrator
                 var redirectStopwatch = Stopwatch.StartNew();
                 var redirectResponse = await _conversationRedirectAgent.GenerateRedirectResponseAsync(
                     form,
-                    currentState.CompletedFieldValues,
+                    completedFieldValues,
                     focusFieldId: null,
                     jumpToConversation? false : messageEvaluation.ContainsDistraction
                 );
@@ -379,11 +408,11 @@ public class SessionOrchestrator
                 // Add assistant response to history
                 redirectMessageList.Add($"assistant: {redirectResponse.FinalThoughts}{redirectFieldFocusInfo}");
                 
-                // Raise message event to log to history
+                // Raise message event to log to history (no field changes in redirect)
                 var redirectMessageEventData = new MessageEventData
                 {
                     Messages = redirectMessageList,
-                    FieldCompletions = currentState.CompletedFieldValues
+                    FieldCompletions = null // No field updates in redirect response
                 };
                 await client.RaiseEventAsync(instanceId, EventNames[0], JsonSerializer.Serialize(redirectMessageEventData, JsonOptions));
                 
@@ -417,19 +446,33 @@ public class SessionOrchestrator
             {
                 var extractStopwatch = Stopwatch.StartNew();
                 newFieldValues = await _fieldCompletionAgent.ExtractFieldValuesAsync(
-                    currentState.History.TakeLast(5).ToList(), // Pass the last 20 messages as prior dialog for context 
+                    priorMessages.TakeLast(5).ToList(), // Pass the last 5 messages as prior dialog for context 
                     form, 
-                    currentState.CompletedFieldValues,
+                    completedFieldValues,
                     chat_command=="init"? true : false );// Anticipate bulk completion on initial message
                 extractStopwatch.Stop();
                 _logger.LogInformation("ExtractFieldValuesAsync completed in {Seconds:F2} seconds with {Count} fields extracted",
                     extractStopwatch.Elapsed.TotalSeconds,
                     newFieldValues?.Count ?? 0);
 
-                // Update current state with new values
+                // Update local field values for use in subsequent operations
                 if (newFieldValues != null && newFieldValues.Count > 0)
                 {
-                    UpdateFieldValues(currentState, newFieldValues);
+                    foreach (var newValue in newFieldValues)
+                    {
+                        if (!string.IsNullOrEmpty(newValue.FieldName))
+                        {
+                            var inferredNote = newValue.Inferred == true ? " (Inferred)" : "";
+                            var draftedNote = newValue.Drafted == true ? " (Drafted)" : "";
+                            var note = $"{newValue.Note}{inferredNote}{draftedNote}";
+                            
+                            completedFieldValues[newValue.FieldName] = new FieldValue
+                            {
+                                Value = newValue.Value,
+                                Note = string.IsNullOrEmpty(note) ? null : note
+                            };
+                        }
+                    }
                 }
                 
                 // Validate new field values
@@ -439,7 +482,7 @@ public class SessionOrchestrator
                     validationResult = await _fieldValidationAgent.ValidateFieldValuesAsync(
                         body,
                         form,
-                        currentState.CompletedFieldValues,
+                        completedFieldValues,
                         newFieldValues);
                     validationStopwatch.Stop();
                     _logger.LogInformation("ValidateFieldValuesAsync completed in {Seconds:F2} seconds", validationStopwatch.Elapsed.TotalSeconds);
@@ -450,9 +493,9 @@ public class SessionOrchestrator
             // Generate conversational response
             var conversationStopwatch = Stopwatch.StartNew();
             var conversationResponse = await _conversationAgent.GenerateResponseAsync(
-                currentState.History ?? new List<string>(),
+                priorMessages,
                 form,
-                currentState.CompletedFieldValues,
+                completedFieldValues,
                 newFieldValues,
                 validationResult,
                 focusFieldId: null // TODO: Add focusFieldId parameter to the Send function if needed
@@ -474,8 +517,12 @@ public class SessionOrchestrator
                 //Add the drafted value to the new field values list
                 newFieldValues.Add(draftedFieldValue);
                 
-                // Update the current state with the drafted field
-                UpdateFieldValues(currentState, new List<FormFieldValue> { draftedFieldValue });
+                // Update local field values
+                completedFieldValues[draftedFieldValue.FieldName] = new FieldValue
+                {
+                    Value = draftedFieldValue.Value,
+                    Note = draftedFieldValue.Note
+                };
             }
 
 
@@ -493,11 +540,23 @@ public class SessionOrchestrator
                 messageList.Add($"form_input: [{string.Join(", ", fieldNames)}]");
             }
 
-            // Create message event data that includes both message and field completions
+            // Create message event data - only pass NEW field values (not all)
+            // to reduce event payload size since old values are already in entity
+            Dictionary<string, FieldValue>? newFieldCompletions = null;
+            if (newFieldValues != null && newFieldValues.Count > 0)
+            {
+                newFieldCompletions = newFieldValues
+                    .Where(f => !string.IsNullOrEmpty(f.FieldName))
+                    .ToDictionary(
+                        f => f.FieldName!,
+                        f => new FieldValue { Value = f.Value, Note = f.Note }
+                    );
+            }
+            
             var messageEventData = new MessageEventData
             {
                 Messages = messageList,
-                FieldCompletions = currentState.CompletedFieldValues
+                FieldCompletions = newFieldCompletions
             };
             
             // Raise the message event to the orchestrator with all data
@@ -582,17 +641,17 @@ public class SessionOrchestrator
             return notFound;
         }
         
+        // Get field values from entity
+        var completedFieldValues = await GetFieldValuesFromEntityAsync(client, instanceId);
+        
         HttpResponseData response = req.CreateResponse(HttpStatusCode.OK);
         response.Headers.Add("Content-Type", "application/json");
         
         // Convert Dictionary<string, FieldValue> to Dictionary<string, string> for output
         var completedFieldValuesOutput = new Dictionary<string, string>();
-        if (currentState.CompletedFieldValues != null)
+        foreach (var kvp in completedFieldValues)
         {
-            foreach (var kvp in currentState.CompletedFieldValues)
-            {
-                completedFieldValuesOutput[kvp.Key] = kvp.Value.Value?.ToString() ?? "";
-            }
+            completedFieldValuesOutput[kvp.Key] = kvp.Value.Value?.ToString() ?? "";
         }
         
         var responseObject = new
@@ -665,11 +724,14 @@ public class SessionOrchestrator
             return badRequest;
         }
         
+        // Get current field values from entity for validation
+        var completedFieldValues = await GetFieldValuesFromEntityAsync(client, instanceId);
+        
         // Validate the field values using the validation agent
         var validationResult = await _fieldValidationAgent.ValidateFieldValuesAsync(
             string.Empty, // No user message for direct field updates
             form,
-            currentState.CompletedFieldValues,
+            completedFieldValues,
             fieldUpdateRequest.NewFieldValues);
         
         // Create message list with form_input notification
@@ -934,11 +996,14 @@ public class SessionOrchestrator
                 return badRequest;
             }
             
+            // Get current field values from entity for validation
+            var completedFieldValues = await GetFieldValuesFromEntityAsync(client, instanceId);
+            
             // Validate the field values using the validation agent
             var validationResult = await _fieldValidationAgent.ValidateFieldValuesAsync(
                 string.Empty,
                 form,
-                currentState.CompletedFieldValues,
+                completedFieldValues,
                 fieldUpdateRequest.NewFieldValues);
             
             // Create message list with form_input notification
@@ -996,6 +1061,95 @@ public class SessionOrchestrator
     }
 
 
+    [Function("SessionOrchestrator_Terminate")]
+    public async Task<HttpResponseData> Terminate(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "session/{instanceId}/terminate")] HttpRequestData req,
+        string instanceId,
+        [DurableClient] DurableTaskClient client)
+    {
+        try
+        {
+            await client.TerminateInstanceAsync(instanceId, "Terminated by user request");
+            
+            HttpResponseData response = req.CreateResponse(HttpStatusCode.OK);
+            response.Headers.Add("Content-Type", "application/json");
+            await response.WriteStringAsync(JsonSerializer.Serialize(new 
+            { 
+                status = "terminated",
+                instanceId = instanceId,
+                message = "Orchestration instance has been terminated"
+            }));
+            return response;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to terminate instance {InstanceId}", instanceId);
+            var errorResponse = req.CreateResponse(HttpStatusCode.InternalServerError);
+            await errorResponse.WriteStringAsync(JsonSerializer.Serialize(new { error = "Failed to terminate instance", message = ex.Message }));
+            return errorResponse;
+        }
+    }
+
+    [Function("SessionOrchestrator_Debug")]
+    public async Task<HttpResponseData> Debug(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "session/{instanceId}/debug")] HttpRequestData req,
+        string instanceId,
+        [DurableClient] DurableTaskClient client)
+    {
+        try
+        {
+            var instance = await client.GetInstanceAsync(instanceId, true);
+            
+            if (instance == null)
+            {
+                var notFound = req.CreateResponse(HttpStatusCode.NotFound);
+                await notFound.WriteStringAsync(JsonSerializer.Serialize(new { error = "Instance not found" }));
+                return notFound;
+            }
+            
+            // Get custom status
+            SessionState? customStatus = null;
+            try
+            {
+                customStatus = instance.ReadCustomStatusAs<SessionState>();
+            }
+            catch { }
+            
+            // Get input
+            SessionState? inputState = null;
+            try
+            {
+                inputState = instance.ReadInputAs<SessionState>();
+            }
+            catch { }
+            
+            // Get entity data
+            var historyFromEntity = await GetHistoryFromEntityAsync(client, instanceId);
+            var fieldsFromEntity = await GetFieldValuesFromEntityAsync(client, instanceId);
+            
+            HttpResponseData response = req.CreateResponse(HttpStatusCode.OK);
+            response.Headers.Add("Content-Type", "application/json");
+            await response.WriteStringAsync(JsonSerializer.Serialize(new 
+            { 
+                instanceId = instanceId,
+                runtimeStatus = instance.RuntimeStatus.ToString(),
+                customStatus = customStatus,
+                customStatusRaw = instance.SerializedCustomStatus,
+                orchestrationInput = inputState,
+                historyEntity = new { count = historyFromEntity.Count, messages = historyFromEntity },
+                fieldsEntity = new { count = fieldsFromEntity.Count, fields = fieldsFromEntity }
+            }, new JsonSerializerOptions { WriteIndented = true }));
+            return response;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to get debug info for instance {InstanceId}", instanceId);
+            var errorResponse = req.CreateResponse(HttpStatusCode.InternalServerError);
+            await errorResponse.WriteStringAsync(JsonSerializer.Serialize(new { error = "Failed to get debug info", message = ex.Message }));
+            return errorResponse;
+        }
+    }
+
     private class MessageEventData
     {
         public List<string>? Messages { get; set; }
@@ -1024,35 +1178,6 @@ public class SessionOrchestrator
         public string OldInstanceId { get; set; } = string.Empty;
         public string NewInstanceId { get; set; } = string.Empty;
         public DateTime ReplacedAt { get; set; }
-    }
-
-    private void UpdateFieldValues(SessionState state, List<FormFieldValue> newFieldValues, string explicitNote = "")
-    {
-        foreach (var newValue in newFieldValues)
-        {
-            if (!string.IsNullOrEmpty(newValue.FieldName))
-            {
-                var inferredNote = newValue.Inferred == true ? " (Inferred)" : "";
-                var draftedNote = newValue.Drafted == true ? " (Drafted)" : "";
-                var note = $"{newValue.Note}{explicitNote}{inferredNote}{draftedNote}";
-                
-                if (note.Length == 0)
-                {
-                    state.CompletedFieldValues[newValue.FieldName] = new FieldValue
-                    {
-                        Value = newValue.Value
-                    };
-                }
-                else
-                {
-                    state.CompletedFieldValues[newValue.FieldName] = new FieldValue
-                    {
-                        Value = newValue.Value,
-                        Note = note
-                    };
-                }
-            }
-        }
     }
 
     private async Task<(Form? form, HttpResponseData? errorResponse, String fieldIds, String sectionNames)> LoadFormAsync(HttpRequestData req, SessionState? currentState)
@@ -1098,6 +1223,61 @@ public class SessionOrchestrator
     {
         var (state, _) = await GetCurrentStateWithStatusAsync(client, instanceId);
         return state;
+    }
+
+    private async Task<List<string>> GetHistoryFromEntityAsync(DurableTaskClient client, string instanceId)
+    {
+        try
+        {
+            var historyEntityId = new EntityInstanceId(nameof(SessionHistoryEntity), instanceId);
+            var historyEntity = await client.Entities.GetEntityAsync(historyEntityId);
+            
+            if (historyEntity != null && historyEntity.State != null)
+            {
+                var historyJson = historyEntity.State.ToString();
+                var history = JsonSerializer.Deserialize<List<string>>(historyJson);
+                return history ?? new List<string>();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to retrieve history from entity for instance {InstanceId}", instanceId);
+        }
+        
+        return new List<string>();
+    }
+
+    private async Task<Dictionary<string, FieldValue>> GetFieldValuesFromEntityAsync(DurableTaskClient client, string instanceId)
+    {
+        try
+        {
+            var fieldsEntityId = new EntityInstanceId(nameof(FormFieldsEntity), instanceId);
+            var fieldsEntity = await client.Entities.GetEntityAsync(fieldsEntityId);
+            
+            if (fieldsEntity != null && fieldsEntity.State != null)
+            {
+                var stateJson = fieldsEntity.State.ToString();
+                var formFieldsState = JsonSerializer.Deserialize<FormFieldsState>(stateJson);
+                
+                if (formFieldsState?.Fields != null)
+                {
+                    // Convert FormFieldValue to FieldValue for backwards compatibility
+                    return formFieldsState.Fields.ToDictionary(
+                        kvp => kvp.Key,
+                        kvp => new FieldValue
+                        {
+                            Value = kvp.Value.Value,
+                            Note = kvp.Value.Note
+                        });
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to retrieve field values from entity for instance {InstanceId}", instanceId);
+        }
+        
+        return new Dictionary<string, FieldValue>();
     }
 
     private async Task<(SessionState? state, OrchestrationRuntimeStatus? status)> GetCurrentStateWithStatusAsync(DurableTaskClient client, string instanceId)
@@ -1232,6 +1412,47 @@ public class SessionOrchestrator
         }
         
         return (currentState, null);
+    }
+
+    // Activity functions for entity operations
+    [Function(nameof(UpdateHistoryActivity))]
+    public async Task UpdateHistoryActivity([ActivityTrigger] object input, [DurableClient] DurableTaskClient client)
+    {
+        var data = JsonSerializer.Deserialize<Dictionary<string, object>>(input.ToString() ?? "{}", 
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        
+        if (data != null && data.ContainsKey("InstanceId") && data.ContainsKey("Messages"))
+        {
+            var instanceId = data["InstanceId"].ToString();
+            var messagesJson = data["Messages"].ToString();
+            var messages = JsonSerializer.Deserialize<List<string>>(messagesJson ?? "[]");
+            
+            if (!string.IsNullOrEmpty(instanceId) && messages != null && messages.Count > 0)
+            {
+                var historyEntityId = new EntityInstanceId(nameof(SessionHistoryEntity), instanceId);
+                await client.Entities.SignalEntityAsync(historyEntityId, "AddRange", messages);
+            }
+        }
+    }
+
+    [Function(nameof(UpdateFieldsActivity))]
+    public async Task UpdateFieldsActivity([ActivityTrigger] object input, [DurableClient] DurableTaskClient client)
+    {
+        var data = JsonSerializer.Deserialize<Dictionary<string, object>>(input.ToString() ?? "{}", 
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        
+        if (data != null && data.ContainsKey("InstanceId") && data.ContainsKey("Fields"))
+        {
+            var instanceId = data["InstanceId"].ToString();
+            var fieldsJson = data["Fields"].ToString();
+            var fields = JsonSerializer.Deserialize<Dictionary<string, FormFieldValue>>(fieldsJson ?? "{}");
+            
+            if (!string.IsNullOrEmpty(instanceId) && fields != null && fields.Count > 0)
+            {
+                var fieldsEntityId = new EntityInstanceId(nameof(FormFieldsEntity), instanceId);
+                await client.Entities.SignalEntityAsync(fieldsEntityId, "UpsertAndGet", fields);
+            }
+        }
     }
 
 }
