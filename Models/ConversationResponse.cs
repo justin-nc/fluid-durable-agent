@@ -6,7 +6,7 @@ public class ConversationResponse
     public string? AcknowledgeInputs { get; set; }
     public string? ValidationConcerns { get; set; }
     public string? FinalThoughts { get; set; }
-    public string? FieldFocus { get; set; }
+    public string? FieldFocusMessage { get; set; }
     public DraftedField? DraftedField { get; set; }
 }
 

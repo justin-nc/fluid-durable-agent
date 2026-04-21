@@ -4,5 +4,11 @@
     "azureFunctions.projectRuntime": "~4",
     "debug.internalConsoleOptions": "neverOpen",
     "azureFunctions.preDeployTask": "publish (functions)",
-    "azureFunctions.projectLanguageModel": 2
+    "azureFunctions.projectLanguageModel": 2,
+  "terminal.integrated.env.windows": {
+    "PATH": "c:\\users\\jjvargas\\.dotnet;${env:PATH}",
+    "DOTNET_ROOT": "${workspaceFolder}\\.dotnet"
+  }
+}
+
 }

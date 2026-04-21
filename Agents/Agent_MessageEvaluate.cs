@@ -34,30 +34,30 @@ public class Agent_MessageEvaluate
         var prompt = $@"SYSTEM MESSAGE:
 As a highly percise evaluator in a process that helps users complete complex forms, you evaluate incoming chat text from a user to help an AI orchestrator understand the content of an incoming message from the user. The user message will contain text as well as the name of the form input field that's currently in focus. Occasionally, the user may select a different field and provide a value for that field. This would not be considered a distraction. You need to return 4 boolean values based on what you observe in an incoming message:
 
-contains_question: The user is asking a question about the field or the form in general.
-
+contains_question: The user is asking a question about the field or the form in general.  
 contains_request: The user is asking you to perform some kind of action such as suggesting an answer or recalling previously entered data.
-
 contains_distraction: The user is attempting to divert the conversation to something not relevant to the form data entry process. 
-
-**IMPORTANT GUIDANCE ON DISTRACTIONS:**
-- Review the FORM CONTEXT below to understand what topics and fields are relevant to this form
-- If the user's message relates to ANY field, topic, or concept mentioned in the form context, it is NOT a distraction - even if they didn't directly answer the last question asked
-- Users may volunteer information about different form fields in any order - this is helpful, not a distraction
-- A user may confirm previously provided information or make corrections - this is helpful, not a distraction
-- Only mark as distraction if the content is clearly unrelated to ANY aspect of the form or its subject matter
-- Examples of actual distractions: asking about unrelated topics (weather, sports, personal matters), attempting to change the subject to something completely outside the form's scope
-- A user asking about a certain field or section of the form is NOT a distraction
- 
-
-
-contains_values: The content of the message appears to answer one or multiple questions or provide value(s) that could be entered into a form field. This could include direct answers to questions, or volunteering information relevant to the form fields.   
+contains_values: The content of the message appears to answer one or multiple questions or provide value(s) that could be entered into a form field. This could include direct answers to questions, or volunteering information relevant to the form fields.
 - Simple one word answers could be field values if the last assistant messsage asked a question.
 
+NOTE ON contains_question vs. contains_request: A user asking ""What are you looking for here?"" is asking a question. A user asking ""Can you help me create complete this field?"" is making a request. The first example would set contains_question to true, the second example would set contains_request to true.
+Nuance is critical here.  For example, if the user is asking if we can skip a field, this is a request, not a question, because they are asking for an action to be taken, not asking for information.
+Conversley if the user says ""Explain"" or ""Help Me Choose"", this should be considered a question, as they are asking for guidance and not an action to be performed.
+
+
+**IMPORTANT GUIDANCE ON DISTRACTIONS:**
+- Review the FORM CONTEXT below to understand what topics and fields are relevant to this form.
+- If the user's message relates to ANY field, topic, or concept mentioned in the form context, it is NOT a distraction - even if they didn't directly answer the last question asked.
+- Users may volunteer information about different form fields in any order - this is helpful, not a distraction.
+- A user may confirm previously provided information or make corrections - this is helpful, not a distraction.
+- Only mark as distraction if the content is clearly unrelated to ANY aspect of the form or its subject matter.
+- Examples of actual distractions: asking about unrelated topics (weather, sports, history, personal matters etc.), attempting to change the subject to something completely outside the form's scope.
+- A user asking about a certain field or section of the form is NOT a distraction.
+ 
 Always provide your output in json. Here are some example transactions:
 
 Example 1:
-A: What is the name of the agency
+assistant: What is the name of the agency?
 user: NC Department of Information Technology
 response: {{{{""contains_question"": false, ""contains_request"": false, ""contains_distraction"": false, ""contains_values"": true}}}}
 
@@ -66,7 +66,7 @@ assistant: Can you tell me what the business case is?
 user: What is the square root of pi?
 response: {{{{""contains_question"": true, ""contains_request"": false, ""contains_distraction"": true, ""contains_values"": false}}}}
 
-Example 3:
+Example 3 - User provides information about a different field (NOT a distraction):
 assistant: Can you tell me what the business case is?
 user: 25,000.00 [inputFocus:budgetAmount]
 response: {{{{""contains_question"": false, ""contains_request"": false, ""contains_distraction"": false, ""contains_values"": true}}}}
@@ -112,6 +112,12 @@ Return ONLY valid JSON with the 4 boolean properties: contains_question, contain
                 content = response?.Text ?? "{}";
                 var evaluation = JsonSerializer.Deserialize<MessageEvaluationResult>(content,
                     new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                //When another value is true, contains_distraction should not be true. This is a sanity check to catch cases where the model may have misunderstood the instructions and marked something as a distraction when it actually contains relevant content.
+                if (evaluation.ContainsDistraction && (evaluation.ContainsQuestion || evaluation.ContainsRequest || evaluation.ContainsValues))
+                {
+                    // If contains_distraction is true, the other three should be false. If not, this is likely a misinterpretation.
+                    evaluation.ContainsDistraction = false;
+                }
                 return evaluation ?? new MessageEvaluationResult();
             }
             catch (JsonException)

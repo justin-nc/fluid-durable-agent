@@ -33,20 +33,48 @@ public class Agent_FieldValidation
             return new ValidationResult();
         }
 
-        // Build field information as JSON
-        var fieldsInfoObject = form.Body.Select(field => new
+        // Collect field IDs from completedFields and newFieldValues
+        var relevantFieldIds = new HashSet<string>();
+        
+       /* if (completedFields != null)
         {
-            id = field.Id,
-            label = field.Label,
-            type = field.Type,
-            subLabel = field.SubLabel,
-            note = field.Note,
-            placeholder = field.Placeholder,
-            isRequired = field.IsRequired,
-            isMultiline = field.IsMultiline,
-            na_option = field.NaOption,
-            choices = field.Choices?.Select(c => new { value = c.Value, title = c.Title }).ToList()
-        }).ToList();
+            foreach (var fieldId in completedFields.Keys)
+            {
+                relevantFieldIds.Add(fieldId);
+            }
+        }*/
+        
+        if (newFieldValues != null)
+        {
+            foreach (var fieldValue in newFieldValues)
+            {
+                if (!string.IsNullOrEmpty(fieldValue.FieldId))
+                {
+                    relevantFieldIds.Add(fieldValue.FieldId);
+                }
+            }
+        }
+
+        // Build field information as JSON - only for relevant fields
+        var fieldsInfoObject = form.Body
+            .Where(field => relevantFieldIds.Contains(field.Id))
+            .Select(field =>
+            {
+                var dict = new Dictionary<string, object?>
+                {
+                    ["id"] = field.Id,
+                    ["label"] = field.Label,
+                    ["type"] = field.Type,
+                    ["subLabel"] = field.SubLabel,
+                    ["note"] = field.Note,
+                    ["placeholder"] = field.Placeholder,
+                };
+                if (field.IsRequired != null) dict["isRequired"] = field.IsRequired;
+                if (field.IsMultiline != null) dict["isMultiline"] = field.IsMultiline;
+                if (field.NaOption != null) dict["na_option"] = field.NaOption;
+                if (field.Choices != null) dict["choices"] = field.Choices.Select(c => new { value = c.Value, title = c.Title }).ToList();
+                return dict;
+            }).ToList();
         
         var fieldsInfo = JsonSerializer.Serialize(fieldsInfoObject, new JsonSerializerOptions { WriteIndented = true });
 
@@ -70,8 +98,8 @@ public class Agent_FieldValidation
         var prompt = $@"You are a validation assistant for an intelligent form completion system. Your job is to validate field values that have been already been extracted from user input and identify any errors or warnings.
 
 # YOUR ROLE
-You validate that field values comply with the validation rules specified in each field's 'note' property. You also flag fields that may need human review or double-checking.
-**FIELDS THAT DO NOT HAVE A VALUE SHOULD NOT BE VALIDATED. ONLY VALIDATE FIELDS WITH PROVIDED VALUES.**
+You validate that the **NEW FIELD VALUES** comply with the validation rules specified in each field's 'note' property. You also flag fields that may need human review or double-checking. 
+COMPLETED FIELD VALUES ARE PROVIDED FOR CONTEXT IN CASE A CONFLICTING VALUES ARE PRESENT (e.g., a Start Date that's after an End Date)
 
 ## FIELDS: A JSON list of fields and their properties.
 **Properties include:**
@@ -113,7 +141,7 @@ These are potential issues that should be reviewed but may be acceptable:
 - If the field has no issue, do not include it in the warnings list
 
 ## NOTES
-- All values (even numeric fields) will be represented as strings. This is not an error as long as the string value represnts a number where required.  
+- All values (even numeric fields) will be represented as strings. This is not an error as long as the string value represents a number where required.  
 - All dates should be today or in the future. Past dates should be flagged as errors unless the field's note explicitly allows for past dates (e.g., ""Date of Birth"").
 - ERROR and WARNING outputs are only for fields that are invalid or questionable.
 
@@ -122,7 +150,7 @@ These are potential issues that should be reviewed but may be acceptable:
 ## FORM FIELDS
 {fieldsInfo}
 
-## COMPLETED FIELDS (EXISTING)
+## COMPLETED FIELDS (EXISTING VALUES PROVIDED FOR CONTEXT IN CASE A CONFLICTING VALUES ARE PRESENT ie a Start Date that's after an End Date)
 {completedFieldsInfo}
 
 ## NEW FIELD VALUES (TO VALIDATE)

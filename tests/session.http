@@ -12,9 +12,15 @@ Content-Type: application/json
 ###
 @instanceId = {{createSession.response.body.instanceId}}
 
-@instanceId=e348ba32fe604494b5d18e2ab2a2115a
+//@instanceId=14e36e1d42984bbc9eb2b687e3869df0
 
 ####
+GET http://localhost:7071/api/session/{{instanceId}}/debug
+
+###
+
+5/1/2026
+###
 
 POST http://localhost:7071/api/session/{{instanceId}}/message
 
@@ -28,7 +34,15 @@ The project must start on 1/1/2025.
 
 POST http://localhost:7071/api/session/{{instanceId}}/message
 
-/next
+can you help me pick?
+
+
+
+###
+
+POST http://localhost:7071/api/session/{{instanceId}}/message
+
+can you suggest a title? [inputFocus: titleOfITNeed]
 
 ###
 POST http://localhost:7071/api/session/{{instanceId}}/message
@@ -44,7 +58,7 @@ POST http://localhost:7071/api/session/{{instanceId}}/fields
 
 POST http://localhost:7071/api/session/{{instanceId}}/message
 
-[inputFocus: problemStatement]Can you help me create this?
+[inputFocus: commodityCode]help!
 
 ###
 POST http://localhost:7071/api/session/{{instanceId}}/message
@@ -97,3 +111,8 @@ POST /api/fieldUpdate/aW5zdGFuY2VJZDp0b2tlbg...
     { "fieldName": "email", "value": "user@example.com" }
   ]
 }
+
+###
+GET http://localhost:7071/api/session/{{instanceId}}/debug
+
+

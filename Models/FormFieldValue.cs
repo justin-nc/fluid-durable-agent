@@ -5,8 +5,8 @@ namespace fluid_durable_agent.Models;
 
 public sealed class FormFieldValue
 {
-    [JsonPropertyName("fieldName")]
-    public string? FieldName { get; set; }
+    [JsonPropertyName("fieldId")]
+    public string? FieldId { get; set; }
 
     [JsonPropertyName("value")]
     public JsonElement? Value { get; set; }

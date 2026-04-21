@@ -23,8 +23,9 @@ var fieldCompletionDeployment = Environment.GetEnvironmentVariable("AZURE_OPENAI
 var fieldValidationDeployment = Environment.GetEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT_FIELDVALIDATION") ?? "gpt-oss-120b";
 var conversationDeployment = Environment.GetEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT_CONVERSATION") ?? deploymentName; //use default if not set
 var messageEvaluateDeployment = Environment.GetEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT_MESSAGEEVALUATE") ?? lightweightDeployment; //use default if not set
-var conversationRedirectDeployment = Environment.GetEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT_CONVERSATIONREDIRECT") ?? lightweightDeployment; //use default if not set
 var commodityCodeLookupDeployment = Environment.GetEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT_COMMODITYCODELOOKUP") ?? lightweightDeployment; //use default if not set
+var fieldIdentificationDeployment = Environment.GetEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT_FIELDIDENTIFICATION") ?? lightweightDeployment; //use default if not set
+var fieldNextDeployment = Environment.GetEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT_FIELDNEXT") ?? lightweightDeployment; //use default if not set
 var key = Environment.GetEnvironmentVariable("AZURE_OPENAI_KEY") ?? throw new InvalidOperationException("AZURE_OPENAI_KEY is required");
 var dtsBackend = Environment.GetEnvironmentVariable("DurableTaskBackend") ?? "http://localhost:8082";
 var taskHubName = Environment.GetEnvironmentVariable("TASKHUB_NAME") ?? "default";
@@ -97,7 +98,8 @@ builder.Services.AddSingleton<fluid_durable_agent.Agents.Agent_FieldCompletion>(
     var chatClient = new AzureOpenAIClient(new Uri(endpoint), new AzureKeyCredential(key))
         .GetChatClient(fieldCompletionDeployment)
         .AsIChatClient();
-    return new fluid_durable_agent.Agents.Agent_FieldCompletion(chatClient);
+    var fieldIdentificationAgent = sp.GetRequiredService<fluid_durable_agent.Agents.Agent_FieldIdentification>();
+    return new fluid_durable_agent.Agents.Agent_FieldCompletion(chatClient, fieldIdentificationAgent);
 });
 
 // Register Agent_FieldValidation with its own client
@@ -128,14 +130,6 @@ builder.Services.AddSingleton<fluid_durable_agent.Agents.Agent_MessageEvaluate>(
     return new fluid_durable_agent.Agents.Agent_MessageEvaluate(chatClient);
 });
 
-// Register Agent_ConversationRedirect with its own client
-builder.Services.AddSingleton<fluid_durable_agent.Agents.Agent_ConversationRedirect>(sp =>
-{
-    var chatClient = new AzureOpenAIClient(new Uri(endpoint), new AzureKeyCredential(key))
-        .GetChatClient(conversationRedirectDeployment)
-        .AsIChatClient();
-    return new fluid_durable_agent.Agents.Agent_ConversationRedirect(chatClient);
-});
 
 // Register Agent_CommodityCodeLookup with its own client
 builder.Services.AddSingleton<fluid_durable_agent.Agents.Agent_CommodityCodeLookup>(sp =>
@@ -146,6 +140,24 @@ builder.Services.AddSingleton<fluid_durable_agent.Agents.Agent_CommodityCodeLook
     var blobStorageService = sp.GetRequiredService<BlobStorageService>();
     var logger = sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<fluid_durable_agent.Agents.Agent_CommodityCodeLookup>>();
     return new fluid_durable_agent.Agents.Agent_CommodityCodeLookup(chatClient, blobStorageService, logger);
+});
+
+// Register Agent_FieldNext with its own client
+builder.Services.AddSingleton<fluid_durable_agent.Agents.Agent_FieldNext>(sp =>
+{
+    var chatClient = new AzureOpenAIClient(new Uri(endpoint), new AzureKeyCredential(key))
+        .GetChatClient(fieldNextDeployment)
+        .AsIChatClient();
+    return new fluid_durable_agent.Agents.Agent_FieldNext(chatClient);
+});
+
+// Register Agent_FieldIdentification with its own client
+builder.Services.AddSingleton<fluid_durable_agent.Agents.Agent_FieldIdentification>(sp =>
+{
+    var chatClient = new AzureOpenAIClient(new Uri(endpoint), new AzureKeyCredential(key))
+        .GetChatClient(fieldIdentificationDeployment)
+        .AsIChatClient();
+    return new fluid_durable_agent.Agents.Agent_FieldIdentification(chatClient);
 });
 
 // Configure Durable Task Client to use DTS backend

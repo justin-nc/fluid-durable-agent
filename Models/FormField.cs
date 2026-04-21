@@ -45,6 +45,9 @@ public class FormField
 
     [JsonPropertyName("decisionTree")]
     public List<DecisionTreeNode>? DecisionTree { get; set; }
+
+    [JsonPropertyName("$when")]
+    public string? When { get; set; }
 }
 
 public class FieldChoice
