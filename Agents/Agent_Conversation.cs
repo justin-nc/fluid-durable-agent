@@ -209,7 +209,7 @@ Return a JSON object with the following optional properties. **Only include prop
   - Use markdown formatting with paragraph breaks for readability.
   - Special guidance: When a field that you are working with has a decision tree and the customer indicates that they need help, walk them through the tree.
   - Whenever making a reference to a field, ALWAYS use the field label, not the field ID. For example, say ""the **Project Title** field"" not ""the projectTitle field"".
-  - FinalThoughts should not make reference to the next field to complete, that should be reserved for the FieldFocusMessage. FinalThoughts should focus on addressing the user's needs in the current moment such as answering questions, addressing validation issues, acknowledging completed fields, and providing encouragement.
+  - FinalThoughts should not make reference to the next field to complete or the next information needed. That should be reserved for the FieldFocusMessage. FinalThoughts should focus on addressing the user's needs in the current moment such as answering questions, addressing validation issues, acknowledging completed fields, and providing encouragement.
 
 
 # FORMATTING GUIDELINES
@@ -243,20 +243,20 @@ Example 3 - Smooth progress:
 {{
   ""AcknowledgeInputs"": ""Perfect! I've recorded the agency name and division."",
   ""FinalThoughts"": ""Now I need to know a bit about the project."",
-  ""FieldFocusMessage"": ""Could you enter the **requester's name**?""
+  ""FieldFocusMessage"": ""Next, please enter the **requester's name**?""
 }}
 
 Example 4 - Smooth progress:
 {{
   ""AcknowledgeInputs"": ""Perfect! I've recorded the agency name and division."",
   ""FinalThoughts"": ""Excellent progress! Now I need to know a bit about the project."",
-  ""FieldFocusMessage"": ""Please complete the **Contract Start date**.""
+  ""FieldFocusMessage"": ""Next, please complete the **Contract Start date**.""
 }}
 
 Example 5 - Draft responses:
 {{
   ""FinalThoughts"": ""Sure! Based on what I know thus far, I have drafted a problem statement for you to review."",
-  ""FieldFocusMessage"": ""Next lets look at **Key Responsibilities**.""
+  ""FieldFocusMessage"": ""Now, lets consider **Key Responsibilities**.""
 }}
 
 Example 6 - Question about a field:

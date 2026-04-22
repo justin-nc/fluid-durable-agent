@@ -349,8 +349,7 @@ public class SessionOrchestrator
             bool jumpToConversation = false; // This can be set based on certain conditions in the message evaluation if needed
             if (body.Trim().Length ==0 || chat_command == "next")
             {
-                jumpToConversation = true;
-                priorMessages.Add($"system: The user message represents an initial dump of information from the user."); // Add the initial message to the prior messages for evaluation
+                jumpToConversation = true;            
                 _logger.LogInformation("Message is empty or next chat_command received, skipping to conversation generation for instance {InstanceId}", instanceId);
             }
             else {
@@ -358,9 +357,17 @@ public class SessionOrchestrator
                     priorMessages.Add($"system: The user message represents an initial dump of information from the user."); // Add the initial message to the prior messages for evaluation
                 }   
             }
-            priorMessages.Add($"user: {body}"); // Add the new message to the prior messages for evaluation
-
-
+            var priorMessagesClean = new List<string>(priorMessages);
+            // Strip [inputFocus: <fieldId>] prefix if present at the start of the message
+            var inputFocusMatch = System.Text.RegularExpressions.Regex.Match(body.TrimStart(), @"^\[inputFocus:\s*([^\]]*)\]\s*");
+            var cleanBody = inputFocusMatch.Success ? body.TrimStart().Substring(inputFocusMatch.Length) : body;
+            var inputFocusFieldId = inputFocusMatch.Success ? inputFocusMatch.Groups[1].Value.Trim() : null;
+            priorMessages.Add($"user: {body}"); // Add the new message to the prior messages for evaluation            
+            //Because sometime the input focus can distract the model from understanding the context of the user input, 
+            //a version of the dialog without this data is needed (form completions where the user is answering the bot's 
+            // question even though their client is focused on another field)
+            priorMessagesClean.Add($"user: {cleanBody}"); // Add the new message to the prior messages for evaluation
+            
             //Look at the message to evaluate its content
             var evaluationStopwatch = Stopwatch.StartNew();
             var messageEvaluation =chat_command == "init" ? new MessageEvaluationResult { ContainsQuestion = false, ContainsRequest = false, ContainsDistraction = false, ContainsValues = true } : new MessageEvaluationResult { ContainsQuestion = false, ContainsRequest = false, ContainsDistraction = false, ContainsValues = false };
@@ -381,11 +388,18 @@ public class SessionOrchestrator
             var validationResult = new ValidationResult();
 
             // If message contains values, extract and validate field values
-            if (messageEvaluation.ContainsValues && body.Trim().Length > 0)
+            if ((messageEvaluation.ContainsValues || messageEvaluation.ContainsRequest) && body.Trim().Length > 0)
             {
+                var priorMessagesForExtraction = priorMessagesClean.TakeLast(5).ToList();
+                if (messageEvaluation.ContainsRequest)
+                {
+                    priorMessagesForExtraction = priorMessagesClean.Count > 10
+                        ? new List<string> { priorMessagesClean[0] }.Concat(priorMessagesClean.TakeLast(10)).ToList()
+                        : priorMessagesClean.ToList();
+                }
                 var extractStopwatch = Stopwatch.StartNew();
                 newFieldValues = await _fieldCompletionAgent.ExtractFieldValuesAsync(
-                    priorMessages.TakeLast(5).ToList(), // Pass the last 5 messages as prior dialog for context 
+                    priorMessagesForExtraction, // Pass the extracted prior messages for context
                     form, 
                     completedFieldValues,
                     chat_command=="init"? true : false );// Anticipate bulk completion on initial message
@@ -435,7 +449,7 @@ public class SessionOrchestrator
             }
             else
             {
-                nextField = await DetermineNextFieldIfApplicableAsync(messageEvaluation, form, completedFieldValues, priorMessages.TakeLast(5).ToList());
+                nextField = await DetermineNextFieldIfApplicableAsync(messageEvaluation, form, completedFieldValues, priorMessagesClean.TakeLast(5).ToList());
             }
 
             // Generate conversational response
@@ -506,7 +520,7 @@ public class SessionOrchestrator
             var messageList = new List<string>
             {
                 $"user: {body}",
-                $"assistant: {conversationResponse.FinalThoughts}{fieldFocusInfo}"
+                $"assistant: {conversationResponse.FinalThoughts} {fieldFocusInfo}"
             };
 
             // Add form_input message if any fields were updated
@@ -1191,7 +1205,6 @@ public class SessionOrchestrator
     {
         if (messageEvaluation.ContainsQuestion )
             return null;
-
         var fieldNextStopwatch = Stopwatch.StartNew();
         var nextField = await _fieldNextAgent.DetermineNextFieldAsync(form, completedFieldValues, recentMessages);
         fieldNextStopwatch.Stop();

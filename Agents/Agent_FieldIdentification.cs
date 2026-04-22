@@ -22,120 +22,107 @@ public class Agent_FieldIdentification
     public async Task<List<FormField>> IdentifyAnswerableFieldsAsync(List<FormField> fields, List<string> priorDialog)
     {
         var safeDialog = priorDialog ?? new List<string>();
-        //r lastUserMessage = safeDialog.Count >= 1 ? safeDialog[^1] : string.Empty;
-        //r lastAssistantMessage = safeDialog.Count >= 2 ? safeDialog[^2] : string.Empty;
 
-       /*.if (fields == null || fields.Count == 0 || string.IsNullOrWhiteSpace(lastUserMessage))
-        {
-            return new List<FormField>();
-        }*/
+        // Determine if this is an "init" message — run a second pass if so
+        var lastUserMessage = safeDialog.LastOrDefault() ?? string.Empty;
+        bool isInit = lastUserMessage.Contains("init", StringComparison.OrdinalIgnoreCase);
+        int passes = priorDialog.Count < 3  || isInit ? 2 : 1;
 
-        // Build field information as simplified JSON (just label and id)
-        var fieldsInfoObject = fields.Where(field => !string.IsNullOrEmpty(field.Id)).Select(field => new
-        {
-            id = field.Id,
-            label = field.Label
-        }).ToList();
-        
-        var fieldsInfo = JsonSerializer.Serialize(fieldsInfoObject, new JsonSerializerOptions { WriteIndented = false });
-
-      /* r assistantContext = string.IsNullOrWhiteSpace(lastAssistantMessage)
-            ? string.Empty
-            : $"\nLast assistant message (for context): {lastAssistantMessage}"; */
+        var fieldsInfoObject = fields.Where(field => !string.IsNullOrEmpty(field.Id) && (field.Type?.Contains("Input") == true)).Select(field => new { id = field.Id, label = field.Label }).ToList();
 
         var prompt = $@"You are a planning agent which is part of a larger team of agents which are helping a user complete a very long form.
-You have this list of form fields and their id:
-{fieldsInfo}
+INSTRUCTIONS:
 
-Your job is to take the message stream for context and then the last user message and provide the id for fields that the user text would be capable of answering. Provide the list as a json array.
+Your job is to take the message stream and provide the id for fields that the user text would be capable of answering. Provide the list as a json array.
+When the last message from the user was ""init"" this is an indication that this is an initialization phase, which means you should look to all message stream content for potential field completions.
 An example of this would be if the assistant's last message said ""[Next focus field: divisionOfficeName]"" and the user then said ""Office of Awesomeness"", you would return the id for the divisionOfficeName field, because the user's message appears to be providing an answer to that field.
-
-Prior Dialog:
-{string.Join("\n", safeDialog)}
 
 Return ONLY a JSON array of field IDs (strings) that can be answered by the user's input.
 If no fields can be answered, return an empty array: []
-Example response: [""{fieldsInfoObject[0]}"", ""{fieldsInfoObject[1]}""]";
-        // Try up to 5 times with 200ms delay between attempts
-        int maxAttempts = 5;
-        for (int attempt = 0; attempt < maxAttempts; attempt++)
+Example response: [""{fieldsInfoObject[0].id}"", ""{fieldsInfoObject[1].id}""]
+
+-----INPUTS-----
+
+MESSAGE STREAM:
+{string.Join("\n", safeDialog)}
+
+FORM FIELDS:
+";
+
+        // Accumulate identified field IDs across passes
+        var accumulatedFieldIds = new List<string>();
+
+        for (int pass = 0; pass < passes; pass++)
         {
-            try
+            var fieldsInfo=BuildFieldsInfo(fields, accumulatedFieldIds);
+            int maxAttempts = 5;
+            for (int attempt = 0; attempt < maxAttempts; attempt++)
             {
-                var messages = new List<ChatMessage>
+                try
                 {
-                    new ChatMessage(ChatRole.System, prompt)
-                };
-
-                var response = await _chatClient.GetResponseAsync(messages, cancellationToken: default);
-                var responseText =  response?.Text ?? "{}";
-                // Clean up markdown code blocks if present
-                if (responseText.StartsWith("```json"))
-                {
-                    responseText = responseText.Substring(7);
-                }
-                if (responseText.StartsWith("```"))
-                {
-                    responseText = responseText.Substring(3);
-                }
-                if (responseText.EndsWith("```"))
-                {
-                    responseText = responseText.Substring(0, responseText.Length - 3);
-                }
-                responseText = responseText.Trim();
-
-                // Parse the JSON array
-                var fieldIds = JsonSerializer.Deserialize<List<string>>(responseText);
-                
-                // Validate that we got a valid response
-                if (fieldIds != null)
-                {
-                    // Filter the original fields list to only include identified field IDs
-                    var identifiedFields = fields.Where(f => fieldIds.Contains(f.Id)).ToList();
-                    
-                    // If we got valid field IDs that match actual fields, return them
-                    if (identifiedFields.Count > 0 || attempt == maxAttempts - 1)
+                    var promptWithFields = prompt + fieldsInfo;
+                    var messages = new List<ChatMessage>
                     {
-                        return identifiedFields;
+                        new ChatMessage(ChatRole.System, promptWithFields)
+                    };
+
+                    var response = await _chatClient.GetResponseAsync(messages, cancellationToken: default);
+                    var responseText = response?.Text ?? "{}";
+                    // Clean up markdown code blocks if present
+                    if (responseText.StartsWith("```json"))
+                        responseText = responseText.Substring(7);
+                    if (responseText.StartsWith("```"))
+                        responseText = responseText.Substring(3);
+                    if (responseText.EndsWith("```"))
+                        responseText = responseText.Substring(0, responseText.Length - 3);
+                    responseText = responseText.Trim();
+
+                    var fieldIds = JsonSerializer.Deserialize<List<string>>(responseText);
+
+                    if (pass==1 )
+                    {
+                        // If this is the second pass and we still get no fields, it's likely that the model is struggling to identify fields based on the dialog. In this case, we can consider returning all remaining fields as a fallback, or we can return an empty list to indicate that no fields could be identified. For now, let's log this scenario and return an empty list.
+                        Console.WriteLine($"**Second pass completed fields identified: {fieldIds.Count}.");
                     }
+                    if (fieldIds != null)
+                    {
+                        foreach (var id in fieldIds)
+                            accumulatedFieldIds.Add(id);
+
+                        // Accept result (even empty) and move to next pass
+                        break;
+                    }
+
+                    if (attempt < maxAttempts - 1)
+                        await Task.Delay(200);
                 }
-                
-                // If we got an empty or invalid response and it's not the last attempt, retry
-                if (attempt < maxAttempts - 1)
+                catch (JsonException ex)
                 {
-                    await Task.Delay(200);
+                    Console.WriteLine($"Error parsing response in IdentifyAnswerableFieldsAsync (pass {pass + 1}, attempt {attempt + 1}): {ex.Message}");
+                    if (attempt < maxAttempts - 1)
+                        await Task.Delay(200);
                 }
-            }
-            catch (JsonException ex)
-            {
-                // Log the error
-                Console.WriteLine($"Error parsing response in IdentifyAnswerableFieldsAsync (attempt {attempt + 1}): {ex.Message}");
-                
-                // If this is the last attempt, return empty list
-                if (attempt == maxAttempts - 1)
+                catch (Exception ex)
                 {
-                    return new List<FormField>();
+                    Console.WriteLine($"Error in IdentifyAnswerableFieldsAsync (pass {pass + 1}, attempt {attempt + 1}): {ex.Message}");
+                    if (attempt < maxAttempts - 1)
+                        await Task.Delay(200);
                 }
-                
-                // Delay before retry
-                await Task.Delay(200);
-            }
-            catch (Exception ex)
-            {
-                // Log the error
-                Console.WriteLine($"Error in IdentifyAnswerableFieldsAsync (attempt {attempt + 1}): {ex.Message}");
-                
-                // If this is the last attempt, return empty list
-                if (attempt == maxAttempts - 1)
-                {
-                    return new List<FormField>();
-                }
-                
-                // Delay before retry
-                await Task.Delay(200);
             }
         }
 
-        return new List<FormField>();
+        return fields.Where(f => !string.IsNullOrEmpty(f.Id) && accumulatedFieldIds.Contains(f.Id)).ToList();
+    }
+
+    private static string BuildFieldsInfo(List<FormField> fields, List<string> excludeFields)
+    {
+        var fieldsInfoObject = fields
+            .Where(field => !string.IsNullOrEmpty(field.Id)
+                && (field.Type?.Contains("Input") == true)
+                && !excludeFields.Contains(field.Id!))
+            .Select(field => new { id = field.Id, label = field.Label })
+            .ToList();
+
+        return JsonSerializer.Serialize(fieldsInfoObject, new JsonSerializerOptions { WriteIndented = false });
     }
 }

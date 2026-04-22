@@ -33,6 +33,7 @@ public class Agent_FieldNext
         var fieldsInfoObject = form.Body
             .Select((field, index) => new { field, index })
             .Where(x => x.field.IsRequired == true
+                && (x.field.Type?.Contains("Input") == true)
                 && (completedFields == null || !completedFields.ContainsKey(x.field.Id ?? ""))
                 && IsWhenConditionSatisfied(x.field.When, completedFields))
             .Select(x => new
@@ -69,28 +70,21 @@ public class Agent_FieldNext
         if (recentMessages != null && recentMessages.Count > 0)
         {
             var messagesText = string.Join("\n", recentMessages);
-            recentMessagesSection = $"""
-
-## RECENT CONVERSATION
-{messagesText}
-
-""";
+            recentMessagesSection = $"## RECENT CONVERSATION\n{messagesText}\n---\n";
         }
 
         var prompt = $@"You are a form-completion assistant. Your sole job is to identify the single next required field that the user should complete in this form.
 
 # RULES — follow these exactly
 
-1. **Skip non-required fields** — if `isRequired` is `false` or `null`, NEVER select that field.
-2. **Evaluate `$when` conditions before selecting a field.**
+1. **Evaluate `$when` conditions before selecting a field.**
    - A field's `when` property contains an Adaptive Card expression, e.g. `${{fieldId == 'Yes'}}`.
    - Parse the expression: extract the referenced field ID and expected value.
    - Check whether `completedFields` contains that field ID with the matching value.
    - If the condition is NOT satisfied (the dependency field hasn't been completed yet, or its value doesn't match), treat the field as invisible — do NOT select it.
-3. **Skip already-completed fields** — any field whose ID appears in `completedFields` must not be selected.
-4. **Preserve form order** — scan fields using the order to determine the first eligible field.
-5. **If no eligible field remains**, set `fieldId` to null to signal the form is complete.
-6. **Skip requested by user** - if the user is requesting to skip a field, find the next eligible field after the currently focused field. If there are no more eligible fields after the currently focused field, return null. DO NOT RETURN THE SAME FIELD AS THE ONE LAST MENTIONED.
+2. **Preserve form order** — scan fields using the order to determine the first eligible field.
+3. **If no eligible field remains**, set `fieldId` to null to signal the form is complete.
+4. **Skip requested by user** - if the user is requesting to skip a field, find the next eligible field after the currently focused field. If there are no more eligible fields after the currently focused field, return null. DO NOT RETURN THE SAME FIELD AS THE ONE LAST MENTIONED.
 
 # OUTPUT
 
@@ -122,7 +116,7 @@ Return ONLY valid JSON matching the structure above.";
         };
 
         var content = "";
-        const int maxAttempts = 3;
+        const int maxAttempts = 2;
 
         for (int attempt = 1; attempt <= maxAttempts; attempt++)
         {

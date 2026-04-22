@@ -55,45 +55,10 @@ public class Agent_FieldValidation
             }
         }
 
-        // Build field information as JSON - only for relevant fields
-        var fieldsInfoObject = form.Body
-            .Where(field => relevantFieldIds.Contains(field.Id))
-            .Select(field =>
-            {
-                var dict = new Dictionary<string, object?>
-                {
-                    ["id"] = field.Id,
-                    ["label"] = field.Label,
-                    ["type"] = field.Type,
-                    ["subLabel"] = field.SubLabel,
-                    ["note"] = field.Note,
-                    ["placeholder"] = field.Placeholder,
-                };
-                if (field.IsRequired != null) dict["isRequired"] = field.IsRequired;
-                if (field.IsMultiline != null) dict["isMultiline"] = field.IsMultiline;
-                if (field.NaOption != null) dict["na_option"] = field.NaOption;
-                if (field.Choices != null) dict["choices"] = field.Choices.Select(c => new { value = c.Value, title = c.Title }).ToList();
-                return dict;
-            }).ToList();
-        
-        var fieldsInfo = JsonSerializer.Serialize(fieldsInfoObject, new JsonSerializerOptions { WriteIndented = true });
-
         // Build completed fields information as JSON if present
-        var completedFieldsInfo = string.Empty;
-        if (completedFields != null && completedFields.Count > 0)
-        {
-            var completedFieldsObject = completedFields.Select(kvp => new
-            {
-                fieldId = kvp.Key,
-                value = kvp.Value.Value?.ToString() ?? "",
-                note = kvp.Value.Note
-            }).ToList();
-            
-            completedFieldsInfo = JsonSerializer.Serialize(completedFieldsObject, new JsonSerializerOptions { WriteIndented = true });
-        }
-
-        // Build new field values information as JSON
-        var newFieldValuesInfo = JsonSerializer.Serialize(newFieldValues, new JsonSerializerOptions { WriteIndented = true });
+        var completedFieldsInfo = BuildCompletedFieldsInfoJson(completedFields);
+        // Build new field information as JSON - only for relevant fields   
+        var newFieldValuesInfo = BuildNewFieldValuesInfoJson(newFieldValues);   
 
         var prompt = $@"You are a validation assistant for an intelligent form completion system. Your job is to validate field values that have been already been extracted from user input and identify any errors or warnings.
 
@@ -114,20 +79,19 @@ COMPLETED FIELD VALUES ARE PROVIDED FOR CONTEXT IN CASE A CONFLICTING VALUES ARE
 - 'isMultiline': Indicates the field could be a paragraph or more of text. A single-word answer is not sufficient unless the response is ""N/A"" and 'na_option' is true.
 - 'note': Contains important information about the field which may be helpful when determining how to complete the field based on user input. This could include instructions, definitions, or other relevant details.
 
-
-
 # VALIDATION TYPES
 
 ## ERRORS
 These are critical validation failures that MUST be corrected:
 - Value does not match a required format (e.g., email, date, phone number)
 - Value is not one of the valid choices for a choice field
-- Required field is missing a value
+- Required field is blank
 - Value violates explicit constraints in the field's 'note' property
 - Value type mismatch (e.g., text in a number field)
 - Value exceeds length limits or other hard constraints
 - Do not scrutinize number formatting unless field notes explicitly specify a required format. For example, if a field expects a numeric value, ""1000"", ""1,000"", and ""$1,000"" would all be acceptable unless the field's note says that currency symbols or commas are not allowed.
 - Currency formatting does not need to be strictly validated as long as the numeric value is clear. For example, ""$1,000"" or ""1000"" would both be acceptable for a numeric field representing a budget amount.
+- Dates that conflict (i.e., a Start Date that is after an End Date) should be flagged as errors.
 - If the field has no issue, do not include it in the errors list
 
 ## WARNINGS
@@ -144,19 +108,6 @@ These are potential issues that should be reviewed but may be acceptable:
 - All values (even numeric fields) will be represented as strings. This is not an error as long as the string value represents a number where required.  
 - All dates should be today or in the future. Past dates should be flagged as errors unless the field's note explicitly allows for past dates (e.g., ""Date of Birth"").
 - ERROR and WARNING outputs are only for fields that are invalid or questionable.
-
-
-
-## FORM FIELDS
-{fieldsInfo}
-
-## COMPLETED FIELDS (EXISTING VALUES PROVIDED FOR CONTEXT IN CASE A CONFLICTING VALUES ARE PRESENT ie a Start Date that's after an End Date)
-{completedFieldsInfo}
-
-## NEW FIELD VALUES (TO VALIDATE)
-{newFieldValuesInfo}
-
- 
 
 # OUTPUT FORMAT
 Return a JSON object with two arrays: 'errors' and 'warnings'. Each array contains objects with 'fieldId' and 'concern' properties. Both arrays are optional. Don't provide an array if there are no items to report.
@@ -205,75 +156,169 @@ Return ONLY valid JSON matching the format above.
 If there are not errors or warnings, return an empty object: {{}}
 
 #important context
-{TodayDateContext}";
+{TodayDateContext}
 
-        var messages = new List<Microsoft.Extensions.AI.ChatMessage>
-        {
-            new(Microsoft.Extensions.AI.ChatRole.User, prompt)
-        };
+----INPUTS----
 
-        var content = "";
-        const int maxAttempts = 2;
-        
-        for (int attempt = 1; attempt <= maxAttempts; attempt++)
+## COMPLETED FIELDS (EXISTING VALUES PROVIDED FOR CONTEXT IN CASE A CONFLICTING VALUES ARE PRESENT ie a Start Date that's after an End Date)
+{completedFieldsInfo}
+";
+
+   
+        bool needsSecondPass = newFieldValues.Count > 6;
+        var accumulatedErrors = new List<FieldConcern>();
+        var accumulatedWarnings = new List<FieldConcern>();
+        var seenErrorFields = new HashSet<string>();
+        var seenWarningFields = new HashSet<string>();
+        var concernFieldIds = new List<string>();
+
+        int totalPasses = 1;//needsSecondPass ? 2 : 1; // may become 2 after first pass if empty
+
+        for (int pass = 0; pass < totalPasses; pass++)
         {
-            try
+            var content = "";
+            const int maxAttempts = 2;
+
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
             {
-                var response = await _chatClient.GetResponseAsync(messages, cancellationToken: default);
-                content = response?.Text ?? "{}";
-                
-                // Validate the AI response for actual errors
-                var isValidError = await ValidateErrorResponseAsync(content, newFieldValuesInfo);
-                
-                if (isValidError)
-                {
-                    // Parse and return the validation result
-                    var validationResult = JsonSerializer.Deserialize<ValidationResult>(content, 
-                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                    return validationResult ?? new ValidationResult();
-                }
-                else if (attempt == maxAttempts)
-                {
-                    // After max attempts with invalid errors, return empty arrays
-                    return new ValidationResult();
-                }
-                
-                // If not valid and not final attempt, continue to retry
-            }
-            catch (JsonException)
-            {
-                // If parsing fails, try to extract JSON from the response
-                var jsonStart = content.IndexOf('{');
-                var jsonEnd = content.LastIndexOf('}');
-                if (jsonStart >= 0 && jsonEnd > jsonStart)
-                {
-                    var jsonContent = content.Substring(jsonStart, jsonEnd - jsonStart + 1);
-                    
-                    // Validate the extracted JSON response
-                    var isValidError = await ValidateErrorResponseAsync(jsonContent, newFieldValuesInfo);
-                    
+                try                
+                {   // Build field information as JSON - only for relevant fields that haven't already been flagged as concerns (to focus validation on remaining fields)
+                    var fieldsInfo = BuildFieldsInfoJson(form.Body, relevantFieldIds, concernFieldIds);
+
+                    // Build new field values information as JSON (exclude fields we've already identified concerns with to focus validation on remaining fields)
+                    newFieldValuesInfo = BuildNewFieldValuesInfoJson(newFieldValues, concernFieldIds);
+                    //Combine prefix prompt with fields and new field values info for validation.
+                    var validationPrompt=prompt+$@"## FORM FIELDS
+{fieldsInfo}
+
+## NEW FIELD VALUES (TO VALIDATE)
+{newFieldValuesInfo}";
+
+                    var messages = new List<Microsoft.Extensions.AI.ChatMessage>
+                    {
+                        new(Microsoft.Extensions.AI.ChatRole.User, validationPrompt)
+                    };
+                    var response = await _chatClient.GetResponseAsync(messages, cancellationToken: default);
+                    content = response?.Text ?? "{}";
+
+                    var isValidError = await ValidateErrorResponseAsync(content, newFieldValuesInfo);
+
                     if (isValidError)
                     {
-                        var validationResult = JsonSerializer.Deserialize<ValidationResult>(jsonContent,
+                        var passResult = JsonSerializer.Deserialize<ValidationResult>(content,
                             new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                        return validationResult ?? new ValidationResult();
+
+                        if (passResult != null)
+                        {
+                            foreach (var e in passResult.Errors ?? new List<FieldConcern>())
+                                if (seenErrorFields.Add(e.FieldId)) { accumulatedErrors.Add(e); concernFieldIds.Add(e.FieldId); }
+                            foreach (var w in passResult.Warnings ?? new List<FieldConcern>())
+                                if (seenWarningFields.Add(w.FieldId)) { accumulatedWarnings.Add(w); concernFieldIds.Add(w.FieldId); }
+
+                            // If first pass returned nothing and we weren't already doing 2 passes, add a second
+                            if (pass == 0 && totalPasses == 1 && accumulatedErrors.Count == 0 && accumulatedWarnings.Count == 0)
+                                totalPasses = 2;
+                        }                        
                     }
                     else if (attempt == maxAttempts)
                     {
-                        // After max attempts with invalid errors, return empty arrays
-                        return new ValidationResult();
+                        break;
                     }
                 }
-                else if (attempt == maxAttempts)
+                catch (JsonException)
                 {
-                    return new ValidationResult();
+                    var jsonStart = content.IndexOf('{');
+                    var jsonEnd = content.LastIndexOf('}');
+                    if (jsonStart >= 0 && jsonEnd > jsonStart)
+                    {
+                        var jsonContent = content.Substring(jsonStart, jsonEnd - jsonStart + 1);
+                        var isValidError = await ValidateErrorResponseAsync(jsonContent, newFieldValuesInfo);
+
+                        if (isValidError)
+                        {
+                            var passResult = JsonSerializer.Deserialize<ValidationResult>(jsonContent,
+                                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+                            if (passResult != null)
+                            {
+                                foreach (var e in passResult.Errors ?? new List<FieldConcern>())
+                                    if (seenErrorFields.Add(e.FieldId)) { accumulatedErrors.Add(e); concernFieldIds.Add(e.FieldId); }
+                                foreach (var w in passResult.Warnings ?? new List<FieldConcern>())
+                                    if (seenWarningFields.Add(w.FieldId)) { accumulatedWarnings.Add(w); concernFieldIds.Add(w.FieldId); }
+
+                                if (pass == 0 && totalPasses == 1 && accumulatedErrors.Count == 0 && accumulatedWarnings.Count == 0)
+                                    totalPasses = 2;
+                            }
+                            break;
+                        }
+                    }
+
+                    if (attempt == maxAttempts) break;
                 }
             }
         }
-        
-        return new ValidationResult();
+
+        return new ValidationResult
+        {
+            Errors = accumulatedErrors.Count > 0 ? accumulatedErrors : new List<FieldConcern>(),
+            Warnings = accumulatedWarnings.Count > 0 ? accumulatedWarnings : new List<FieldConcern>()
+        };
     }
     
+    private string BuildNewFieldValuesInfoJson(List<FormFieldValue>? fieldValues, IEnumerable<string>? excludeFieldIds = null)
+    {
+        if (fieldValues == null || fieldValues.Count == 0)
+            return "[]";
+
+        var excludeSet = excludeFieldIds != null ? new HashSet<string>(excludeFieldIds) : new HashSet<string>();
+        var filtered = fieldValues.Where(f => string.IsNullOrEmpty(f.FieldId) || !excludeSet.Contains(f.FieldId)).ToList();
+
+        return JsonSerializer.Serialize(filtered, new JsonSerializerOptions { WriteIndented = true });
+    }
+
+    private string BuildCompletedFieldsInfoJson(Dictionary<string, FieldValue>? completedFields)
+    {
+        if (completedFields == null || completedFields.Count == 0)
+            return string.Empty;
+
+        var completedFieldsObject = completedFields.Select(kvp => new
+        {
+            fieldId = kvp.Key,
+            value = kvp.Value.Value?.ToString() ?? "",
+            note = kvp.Value.Note
+        }).ToList();
+
+        return JsonSerializer.Serialize(completedFieldsObject, new JsonSerializerOptions { WriteIndented = true });
+    }
+
+    private string BuildFieldsInfoJson(List<FormField> fields, IEnumerable<string> fieldIds, IEnumerable<string>? excludeFieldIds = null)
+    {
+        var excludeSet = excludeFieldIds != null ? new HashSet<string>(excludeFieldIds) : new HashSet<string>();
+        var includeSet = new HashSet<string>(fieldIds);
+
+        var fieldsInfoObject = fields
+            .Where(field => includeSet.Contains(field.Id) && !excludeSet.Contains(field.Id))
+            .Select(field =>
+            {
+                var dict = new Dictionary<string, object?>
+                {
+                    ["id"] = field.Id,
+                    ["label"] = field.Label,
+                    ["type"] = field.Type,
+                    ["subLabel"] = field.SubLabel,
+                    ["note"] = field.Note,
+                    ["placeholder"] = field.Placeholder,
+                };
+                if (field.IsRequired != null) dict["isRequired"] = field.IsRequired;
+                if (field.IsMultiline != null) dict["isMultiline"] = field.IsMultiline;
+                if (field.NaOption != null) dict["na_option"] = field.NaOption;
+                if (field.Choices != null) dict["choices"] = field.Choices.Select(c => new { value = c.Value, title = c.Title }).ToList();
+                return dict;
+            }).ToList();
+
+        return JsonSerializer.Serialize(fieldsInfoObject, new JsonSerializerOptions { WriteIndented = true });
+    }
+
     /// <summary>
     /// Validates if the AI-generated errors/warnings are actually valid errors
     /// </summary>

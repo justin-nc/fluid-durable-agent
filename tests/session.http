@@ -25,18 +25,28 @@ GET http://localhost:7071/api/session/{{instanceId}}/debug
 POST http://localhost:7071/api/session/{{instanceId}}/message
 
 /init This procurement is for a new virtual machine hosting platform.  We don't currently have 
-such a system and our customers desperately need it. Our customers need a way to host virtual machines in a secure and scalable environment, and this new platform will provide that capability. The budget is around $1.00 and we need it by the end of Q3 this year.
+such a system and our customers desperately need it. Our customers need a way to host virtual machines in a secure and scalable environment, and this new platform will provide that capability. 
+The budget is around $1.00 and we need it by the end of Q2 this year.
 We will be seeking a HUB vendor.  We have already reached out to several of them to find out who can provide this.
 The project owner is Joe Smith; joe.smith@nc.gov. We have not done any market research yet, so any recommendations would be helpful.
-The project must start on 1/1/2025.
+The project must be completed on 1/1/2025.
 
 ###
 
 POST http://localhost:7071/api/session/{{instanceId}}/message
 
-can you help me pick?
+I thought you said we were good once I provided the owner name.
+###
 
+POST http://localhost:7071/api/session/{{instanceId}}/message
 
+/next
+
+###
+
+POST http://localhost:7071/api/session/{{instanceId}}/message
+
+[inputFocus: titleOfITNeed]Enterprise Architecture
 
 ###
 
@@ -53,6 +63,13 @@ Cloud Application Hosting Service
 POST http://localhost:7071/api/session/{{instanceId}}/fields
 
 { "newFieldValues": [{ "fieldName": "agencyName", "value": "NC Department of Information Technology"}]}
+####
+
+
+POST http://localhost:7071/api/session/{{instanceId}}/message
+
+which fields are left to complete?
+
 ####
 
 

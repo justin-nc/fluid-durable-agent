@@ -67,6 +67,7 @@ public class Agent_FieldCompletion
 Your job is to process user input and extract field values from the user's latest response.
 You only provide the field completions for values that need to be changed or new values.
 If a user doesn't explicitly answer a question, but the answer can be inferred, complete the value but be sure to set 'inferred' to 'true'.
+The user may ask you to create generate a value for a field based on other information they've provided, in which case you should do your best to generate a value that fits the context, but be sure to set 'inferred' to 'true' and provide a note about how you arrived at the generated value.
 
 # DEFINITIONS
 
@@ -109,6 +110,9 @@ If no fields can be populated, return an empty object: {{}}
 
 #IMPORTANT:
 All dates must be in YYYY-MM-DD format.  If the user provides a date in a different format, convert it to YYYY-MM-DD.  If you cannot determine a valid date, do not provide a value for the field.
+Inferences must be well grounded.  
+**ASSUMPTIONS ARE NOT INFERENCES** If a user sets a date, it would not be appropriate to assume another date value unless the user said that the other date was a certain amount of time after the first date, or that the two dates were the same, etc.  If you cannot be certain about an inference, do not include it.
+
 
 
 #Expected Output (JSON):
@@ -150,7 +154,6 @@ An array of FIELD_VALUES that are completed based on the latest user input. SHOU
                 Console.WriteLine($"[Agent_FieldCompletion] Attempt {attempt + 1} to extract field values.");
                 var completedFieldsInfo = BuildCompletedFieldsJson(completedFields);
                 var executePrompt=prompt +completedFieldsInfo;
-                Console.WriteLine($"[Agent_FieldCompletion] Execute Prompt: {executePrompt}");
                 var messages = new List<Microsoft.Extensions.AI.ChatMessage>
                 {
                     new(Microsoft.Extensions.AI.ChatRole.User, executePrompt)
