@@ -12,7 +12,7 @@ Content-Type: application/json
 ###
 @instanceId = {{createSession.response.body.instanceId}}
 
-//@instanceId=14e36e1d42984bbc9eb2b687e3869df0
+#@instanceId=14e36e1d42984bbc9eb2b687e3869df0
 
 ####
 GET http://localhost:7071/api/session/{{instanceId}}/debug
@@ -31,33 +31,46 @@ We will be seeking a HUB vendor.  We have already reached out to several of them
 The project owner is Joe Smith; joe.smith@nc.gov. We have not done any market research yet, so any recommendations would be helpful.
 The project must be completed on 1/1/2025.
 
-###
-
-POST http://localhost:7071/api/session/{{instanceId}}/message
-
-I thought you said we were good once I provided the owner name.
-###
-
-POST http://localhost:7071/api/session/{{instanceId}}/message
-
-/next
 
 ###
 
 POST http://localhost:7071/api/session/{{instanceId}}/message
 
-[inputFocus: titleOfITNeed]Enterprise Architecture
+[inputFocus: solicitationVehicleType]what is this?
 
 ###
 
 POST http://localhost:7071/api/session/{{instanceId}}/message
 
-can you suggest a title? [inputFocus: titleOfITNeed]
+701\u20110200
+
+###
+
+POST http://localhost:7071/api/session/{{instanceId}}/message
+
+suggest one
+
+###
+
+POST http://localhost:7071/api/session/{{instanceId}}/message
+
+please complete any other values that you can infer based on the information provided.
+
+###
+
+POST http://localhost:7071/api/session/{{instanceId}}/message
+
+[inputFocus: commodityCode]can you help me with this?
 
 ###
 POST http://localhost:7071/api/session/{{instanceId}}/message
 
-Cloud Application Hosting Service
+/tool_response (commodityCode): 43211501 - Computer servers, 43232701 - Application server software
+
+###
+POST http://localhost:7071/api/session/{{instanceId}}/message
+
+show me the problem statement
 
 ###
 POST http://localhost:7071/api/session/{{instanceId}}/fields
@@ -68,15 +81,20 @@ POST http://localhost:7071/api/session/{{instanceId}}/fields
 
 POST http://localhost:7071/api/session/{{instanceId}}/message
 
-which fields are left to complete?
+/next
+
+####
+
+POST http://localhost:7071/api/session/{{instanceId}}/message
+
+hi!
 
 ####
 
 
 POST http://localhost:7071/api/session/{{instanceId}}/message
 
-[inputFocus: commodityCode]help!
-
+[inputFocus:commodityCode] can you help me select this?
 ###
 POST http://localhost:7071/api/session/{{instanceId}}/message
 

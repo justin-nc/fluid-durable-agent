@@ -15,4 +15,7 @@ public sealed class MessageEvaluationResult
 
     [JsonPropertyName("contains_values")]
     public bool ContainsValues { get; set; }
+
+    [JsonPropertyName("requires_tool")]
+    public string RequiresTool { get; set; }
 }

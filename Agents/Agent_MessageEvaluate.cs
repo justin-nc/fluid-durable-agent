@@ -20,7 +20,7 @@ public class Agent_MessageEvaluate
     /// <param name="priorMessages">List of prior messages (expected to include the last assistant and user messages)</param>
     /// <param name="formContext">Form context to help detect relevance or distraction</param>
     /// <returns>MessageEvaluationResult with boolean flags</returns>
-    public async Task<MessageEvaluationResult> EvaluateMessageAsync(List<string> priorMessages, string formContext, String formFields,  String formSections)
+    public async Task<MessageEvaluationResult> EvaluateMessageAsync(List<string> priorMessages, string formContext, String formFields,  String formSections, String? tools=null)
     {
         var safePriorMessages = priorMessages ?? new List<string>();
 
@@ -30,14 +30,16 @@ public class Agent_MessageEvaluate
         var lastUserMessage = safePriorMessages.Count >= 1
             ? safePriorMessages[^1]
             : string.Empty;
-
+        var toolList=tools != null ? "- " + tools.Replace("\n", "\n- ") : "";
         var prompt = $@"SYSTEM MESSAGE:
 As a highly percise evaluator in a process that helps users complete complex forms, you evaluate incoming chat text from a user to help an AI orchestrator understand the content of an incoming message from the user. The user message will contain text as well as the name of the form input field that's currently in focus. Occasionally, the user may select a different field and provide a value for that field. This would not be considered a distraction. You need to return 4 boolean values based on what you observe in an incoming message:
 
 contains_question: The user is asking a question about the field or the form in general.  
-contains_request: The user is asking you to perform some kind of action such as suggesting an answer or recalling previously entered data.
+contains_request: The user is asking you to perform some kind of action such as suggesting an answer or recalling previously entered data. If the user is requesting navigation to or selection of a field, this should not be considered a request.
 contains_distraction: The user is attempting to divert the conversation to something not relevant to the form data entry process. 
 contains_values: The content of the message appears to answer one or multiple questions or provide value(s) that could be entered into a form field. This could include direct answers to questions, or volunteering information relevant to the form fields.
+requires_tool (string): The user is asking for help with something for which there is a tool, such as recalling previously entered information, suggesting possible values, or looking up information. (See tool list to determine what qualifies as a tool request).  
+
 - Simple one word answers could be field values if the last assistant messsage asked a question.
 
 NOTE ON contains_question vs. contains_request: A user asking ""What are you looking for here?"" is asking a question. A user asking ""Can you help me create complete this field?"" is making a request. The first example would set contains_question to true, the second example would set contains_request to true.
@@ -81,6 +83,32 @@ assistant: What is the project title?
 user: Actually, the budget is $50,000 and we need it by next month
 response: {{{{""contains_question"": false, ""contains_request"": false, ""contains_distraction"": false, ""contains_values"": true}}}}
 
+xample 6 - User asks for a save (tool use):
+assistant: What is the project title?
+user: [inputFocus:projectTitle] Can you save my progress so far?
+response: {{{{""contains_question"": false, ""contains_request"": true, ""contains_distraction"": false, ""contains_values"": false, ""requires_tool"": ""#SAVE#""}}}}
+
+Example 7 - User asks for lookup (tool use):
+assistant: What is the owner's name?
+user: [inputFocus:ownerName] Can you look up the owner's information?
+response: {{{{""contains_question"": false, ""contains_request"": true, ""contains_distraction"": false, ""contains_values"": false, ""requires_tool"": ""LOOKUP_EMPLOYEE""}}}}
+
+Example 8 - User asking for a field (tool use):
+assistant: What is the project title?
+user: [inputFocus:projectTitle] Can you show me the budget for this project?
+response: {{{{""contains_question"": false, ""contains_request"": true, ""contains_distraction"": false, ""contains_values"": false, ""requires_tool"": ""INTERNAL_FORM_NAV""}}}}
+
+TOOL LIST:
+- #SAVE#: User must be explicitly asking that you save their progress to use this tool.
+- #SUBMIT#: User is asking to submit the form. User 
+- INTERNAL_FORM_NAVIGATION (USE EXTREME CAUTION): The user must be asking to see or be taken to a different field than where they are now in order to use this tool.  A request for a suggestion or a question about a field should not be perceived as a NAVIGATION request.
+{toolList}
+
+SPECIAL NOTE ON TOOL SELECTION:
+**Tool selection must be very deliberate.  Only select a tool if there is overwhelming evidence that it will help the user.** 
+**BE CAUTIOUS ABOUT EXCECUTING A TOOL IN A LOOP. IF THE LATEST USER MESSAGE INDICATES A TOOL WAS ACTIVATED, AVOID CALLING IT IMMEDIATELY AGAIN**
+Calling the wrong tool can lead to a very bad user experience, so if you are not certain that a tool is needed, don't include it.
+
 
 FORM CONTEXT: {formContext}
 
@@ -94,7 +122,9 @@ Please evaluate this dialog:
 assistant: {lastAssistantMessage}
 user: {lastUserMessage}
 
-Return ONLY valid JSON with the 4 boolean properties: contains_question, contains_request, contains_distraction, contains_values.";
+IF A USER IS ASKING FOR HELP WITH A FIELD AND A TOOL EXISTS, USE THE TOOL.
+
+Return ONLY valid JSON with the 4 boolean properties: contains_question, contains_request, contains_distraction, contains_values and the string property requires_tool.";
 
         var messages = new List<Microsoft.Extensions.AI.ChatMessage>
         {

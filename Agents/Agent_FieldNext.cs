@@ -23,7 +23,8 @@ public class Agent_FieldNext
     public async Task<FieldNextResult?> DetermineNextFieldAsync(
         Form form,
         Dictionary<string, FieldValue>? completedFields = null,
-        List<string>? recentMessages = null)
+        List<string>? recentMessages = null,
+        bool ToolCall=false)  //If called from a tool the field info is not filtered.
     {
         if (form?.Body == null || form.Body.Count == 0)
             return null;
@@ -32,10 +33,10 @@ public class Agent_FieldNext
         // Only include fields that have not yet been completed
         var fieldsInfoObject = form.Body
             .Select((field, index) => new { field, index })
-            .Where(x => x.field.IsRequired == true
+            .Where(!ToolCall? (x => x.field.IsRequired == true
                 && (x.field.Type?.Contains("Input") == true)
                 && (completedFields == null || !completedFields.ContainsKey(x.field.Id ?? ""))
-                && IsWhenConditionSatisfied(x.field.When, completedFields))
+                && IsWhenConditionSatisfied(x.field.When, completedFields)): x => x.field.Type?.Contains("Input") == true) // If called from a tool, we want to show all fields regardless of required or completed status, because the user may be trying to navigate to a different field.
             .Select(x => new
             {
                 order = x.index,
@@ -73,21 +74,8 @@ public class Agent_FieldNext
             recentMessagesSection = $"## RECENT CONVERSATION\n{messagesText}\n---\n";
         }
 
-        var prompt = $@"You are a form-completion assistant. Your sole job is to identify the single next required field that the user should complete in this form.
-
-# RULES — follow these exactly
-
-1. **Evaluate `$when` conditions before selecting a field.**
-   - A field's `when` property contains an Adaptive Card expression, e.g. `${{fieldId == 'Yes'}}`.
-   - Parse the expression: extract the referenced field ID and expected value.
-   - Check whether `completedFields` contains that field ID with the matching value.
-   - If the condition is NOT satisfied (the dependency field hasn't been completed yet, or its value doesn't match), treat the field as invisible — do NOT select it.
-2. **Preserve form order** — scan fields using the order to determine the first eligible field.
-3. **If no eligible field remains**, set `fieldId` to null to signal the form is complete.
-4. **Skip requested by user** - if the user is requesting to skip a field, find the next eligible field after the currently focused field. If there are no more eligible fields after the currently focused field, return null. DO NOT RETURN THE SAME FIELD AS THE ONE LAST MENTIONED.
-
-# OUTPUT
-
+        var prompt = "";
+        var promptOutputSpecsAndFieldInfo=$@"# OUTPUT
 Return ONLY a valid JSON object with no markdown fencing:
 {{{{
   ""priorFieldId"": ""<id of the field most recently completed or focused, if available>"",
@@ -101,14 +89,35 @@ Return ONLY a valid JSON object with no markdown fencing:
 
 
 ## FORM FIELDS (in order)
-{fieldsInfo}
+{fieldsInfo}";        
+        if (!ToolCall) {prompt = $@"You are a form-completion assistant. Your sole job is to identify the single next required field that the user should complete in this form.
+
+# RULES — follow these exactly
+
+1. **Evaluate `$when` conditions before selecting a field.**
+   - A field's `when` property contains an Adaptive Card expression, e.g. `${{fieldId == 'Yes'}}`.
+   - Parse the expression: extract the referenced field ID and expected value.
+   - Check whether `completedFields` contains that field ID with the matching value.
+   - If the condition is NOT satisfied (the dependency field hasn't been completed yet, or its value doesn't match), treat the field as invisible — do NOT select it.
+2. **Preserve form order** — scan fields using the order to determine the first eligible field.
+3. **If no eligible field remains**, set `fieldId` to null to signal the form is complete.
+4. **Skip requested by user** - if the user is requesting to skip a field, find the next eligible field after the currently focused field. If there are no more eligible fields after the currently focused field, return null. DO NOT RETURN THE SAME FIELD AS THE ONE LAST MENTIONED.
+
+{promptOutputSpecsAndFieldInfo}
 
 ## COMPLETED FIELDS
 {completedFieldsInfo}
 
 priorFieldId should not be the same as fieldId!
 
-Return ONLY valid JSON matching the structure above.";
+Return ONLY valid JSON matching the structure above.";}
+ else
+        {
+            prompt = $@"You are a form-completion assistant. Your job is to identify the single
+             field that the user is requesting to navigate to in this form, based on the most recent user message. The user may be asking to navigate to a specific field, or they may be asking to skip the currently focused field. In either case, your job is to identify the single field that the user is most likely trying to navigate to.
+{promptOutputSpecsAndFieldInfo}";
+
+        }
 
         var messages = new List<ChatMessage>
         {

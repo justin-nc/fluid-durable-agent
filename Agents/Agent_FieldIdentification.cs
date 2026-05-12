@@ -18,26 +18,37 @@ public class Agent_FieldIdentification
     /// </summary>
     /// <param name="fields">List of form fields with labels and IDs</param>
     /// <param name="priorDialog">The conversation history; last item is the latest user message, second-to-last is the latest assistant message</param>
+    /// <param name="chatCommand">Optional chat command to influence field identification</param>
     /// <returns>List of FormField objects that the message can answer</returns>
-    public async Task<List<FormField>> IdentifyAnswerableFieldsAsync(List<FormField> fields, List<string> priorDialog)
+    public async Task<List<FormField>> IdentifyAnswerableFieldsAsync(List<FormField> fields, List<string> priorDialog, string chatCommand="")
     {
         var safeDialog = priorDialog ?? new List<string>();
 
         // Determine if this is an "init" message — run a second pass if so
         var lastUserMessage = safeDialog.LastOrDefault() ?? string.Empty;
-        bool isInit = lastUserMessage.Contains("init", StringComparison.OrdinalIgnoreCase);
+        bool isInit = chatCommand == "init";
         int passes = priorDialog.Count < 3  || isInit ? 2 : 1;
 
         var fieldsInfoObject = fields.Where(field => !string.IsNullOrEmpty(field.Id) && (field.Type?.Contains("Input") == true)).Select(field => new { id = field.Id, label = field.Label }).ToList();
-
+        var contextText= "the user's last message is answering. The user's message may directly answer a field, or it may provide information that helps you infer which field they are answering. Use the content of the user's message and the field labels to make this determination. In the absense of any context provided by the message stream look at the user's focused field. An example of this would be if the assistant's last message said \"[Next focus field: divisionOfficeName]\" and the user then said \"Office of Awesomeness\", you would return the id for the divisionOfficeName field, because the user's message appears to be providing an answer to that field.";
+        var returnOnlyText="Return ONLY a JSON array of field IDs (strings) that are answered by the user's input.";
+        if (chatCommand == "tool_response")
+        {
+            contextText = "the user's last message is answering. The user's message was actually a response from a tool that you invoked.  Field selection should only be the ids for the field(s) the tool provides the answer to.";
+            returnOnlyText="Return ONLY a JSON array of field IDs that are answered by the tool's response. Do not use the user's message content to determine field selection, only consider the tool response content.";
+        }
+        if (chatCommand == "init")
+        {
+            contextText = "The user's last message was provided in an initializtion phase, which means you should look to all message stream content for potential field completions.";
+        }        
         var prompt = $@"You are a planning agent which is part of a larger team of agents which are helping a user complete a very long form.
 INSTRUCTIONS:
 
-Your job is to take the message stream and provide the id for fields that the user text would be capable of answering. Provide the list as a json array.
-When the last message from the user was ""init"" this is an indication that this is an initialization phase, which means you should look to all message stream content for potential field completions.
-An example of this would be if the assistant's last message said ""[Next focus field: divisionOfficeName]"" and the user then said ""Office of Awesomeness"", you would return the id for the divisionOfficeName field, because the user's message appears to be providing an answer to that field.
+Your job is to provide the ids for the field(s)  {contextText}
 
-Return ONLY a JSON array of field IDs (strings) that can be answered by the user's input.
+{returnOnlyText}
+
+REMOVE AMBIGUITY: If a user's message could only potentially answer one question, you must choose only the best field to answer.  If the user provides an answer like ""Yes"", then are ONLY answering the last question they received.
 If no fields can be answered, return an empty array: []
 Example response: [""{fieldsInfoObject[0].id}"", ""{fieldsInfoObject[1].id}""]
 
@@ -79,11 +90,8 @@ FORM FIELDS:
 
                     var fieldIds = JsonSerializer.Deserialize<List<string>>(responseText);
 
-                    if (pass==1 )
-                    {
-                        // If this is the second pass and we still get no fields, it's likely that the model is struggling to identify fields based on the dialog. In this case, we can consider returning all remaining fields as a fallback, or we can return an empty list to indicate that no fields could be identified. For now, let's log this scenario and return an empty list.
-                        Console.WriteLine($"**Second pass completed fields identified: {fieldIds.Count}.");
-                    }
+                     // If this is the second pass and we still get no fields, it's likely that the model is struggling to identify fields based on the dialog. In this case, we can consider returning all remaining fields as a fallback, or we can return an empty list to indicate that no fields could be identified. For now, let's log this scenario and return an empty list.
+                    Console.WriteLine($"**Pass {pass + 1} completed fields identified: {fieldIds.Count}.");
                     if (fieldIds != null)
                     {
                         foreach (var id in fieldIds)
@@ -91,6 +99,14 @@ FORM FIELDS:
 
                         // Accept result (even empty) and move to next pass
                         break;
+                    }
+                    if (chatCommand=="tool_response" && accumulatedFieldIds.Count > 0)
+                    {
+                        break;
+                    }
+                    else
+                    {
+                        Console.WriteLine($"**Pass {pass + 1} received invalid response to tool_response prompt. Response content: {responseText}");
                     }
 
                     if (attempt < maxAttempts - 1)

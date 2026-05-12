@@ -29,15 +29,17 @@ public class Agent_FieldCompletion
     /// <param name="form">The form containing fields to check against</param>
     /// <param name="completedFields">List of fields that have already been completed</param>
     /// <returns>List of extracted form field values</returns>
-    public async Task<List<FormFieldValue>> ExtractFieldValuesAsync(List<String> priorDialog, Form form, Dictionary<string, FieldValue>? completedFields = null, bool  anticipateBulkCompletion = false)
+    public async Task<List<FormFieldValue>> ExtractFieldValuesAsync(List<String> priorDialog, Form form, Dictionary<string, FieldValue>? completedFields = null, string? chatCommand = null)
     {
+        bool anticipateBulkCompletion = chatCommand == "init";
+        string toolResponseText = chatCommand == "tool_response"? "The last response from the user was actually a tool response, so you should not expect the user to be providing values for multiple fields at once. Instead, look for information that would help complete the specific field that the tool response was related to." : string.Empty;
         if (form?.Body == null || form.Body.Count == 0)
         {
             return new List<FormFieldValue>();
         }
 
         // Call Agent_FieldIdentification to filter fields
-        var identifiedFields = await _fieldIdentificationAgent.IdentifyAnswerableFieldsAsync(form.Body, priorDialog);
+        var identifiedFields = await _fieldIdentificationAgent.IdentifyAnswerableFieldsAsync(form.Body, priorDialog, chatCommand ?? string.Empty);
         
         // If no fields were identified, return empty list
         if (identifiedFields.Count == 0)
@@ -67,7 +69,9 @@ public class Agent_FieldCompletion
 Your job is to process user input and extract field values from the user's latest response.
 You only provide the field completions for values that need to be changed or new values.
 If a user doesn't explicitly answer a question, but the answer can be inferred, complete the value but be sure to set 'inferred' to 'true'.
+When the text of a user message provides a field value this would not be considered an inference, but if the user provides a date and you infer that another date is a certain amount of time after that date, that would be an inference.  If you cannot be certain about an inference, do not include it.
 The user may ask you to create generate a value for a field based on other information they've provided, in which case you should do your best to generate a value that fits the context, but be sure to set 'inferred' to 'true' and provide a note about how you arrived at the generated value.
+When a user provides a simply one-word answer to a question, it's often the case that this is meant to be a field value, even if the user doesn't explicitly say ""the value for [field] is [value]"".  Use the context of the conversation and the form to determine when this is the case and extract accordingly.
 
 # DEFINITIONS
 
@@ -80,7 +84,7 @@ The user may ask you to create generate a value for a field based on other infor
 
 #Inputs to anticipate: 
 
-## PRIOR_DIALOG  - The conversation that should be inspected for values.
+## PRIOR_DIALOG  - The conversation that should be inspected for values.  YOU ARE PROVIDED A CONVERSATION HISTORY BUT YOU MUST USE EXTREME DISCRETION WHEN DECIDING WHICH FIELDS TO COMPLETE. YOU ARE THE FIRST TO SEE THE LAST MESSAGE.  OTHER USER MESSAGES HAVE ALREADY BEEN SEEN BY YOU IN THE PAST AND LIKELY DON'T REPRESENT NEW VALUES.
 
 ## FIELDS: A JSON list of fields and their properties that needs to be captured.
 **Properties include:**
@@ -109,6 +113,7 @@ Return all values (even number fields) as strings.  Do not attempt to return num
 If no fields can be populated, return an empty object: {{}}
 
 #IMPORTANT:
+{{toolResponseText}}
 All dates must be in YYYY-MM-DD format.  If the user provides a date in a different format, convert it to YYYY-MM-DD.  If you cannot determine a valid date, do not provide a value for the field.
 Inferences must be well grounded.  
 **ASSUMPTIONS ARE NOT INFERENCES** If a user sets a date, it would not be appropriate to assume another date value unless the user said that the other date was a certain amount of time after the first date, or that the two dates were the same, etc.  If you cannot be certain about an inference, do not include it.
@@ -142,7 +147,7 @@ An array of FIELD_VALUES that are completed based on the latest user input. SHOU
 
         // Try up to 5 times to extract field values with 200ms delay between attempts
         List<FormFieldValue> extractedValues = new List<FormFieldValue>();
-        int maxAttempts = 5;
+        int maxAttempts = chatCommand == "init" ? 5 : 2; // Allow more attempts for init since it's more likely to be a bulk completion and we want to give the model more chances to extract all values
         int identifiedFieldsCount = identifiedFields.Count;
         
         for (int attempt = 0; attempt < maxAttempts; attempt++)
@@ -151,7 +156,7 @@ An array of FIELD_VALUES that are completed based on the latest user input. SHOU
             try
             {
                 // Build completed fields information as JSON if present
-                Console.WriteLine($"[Agent_FieldCompletion] Attempt {attempt + 1} to extract field values.");
+                Console.WriteLine($"[Agent_FieldCompletion] Attempt {attempt + 1} to extract field values. Identified fields: [{string.Join(", ", identifiedFields.Select(f => f.Id))}]");
                 var completedFieldsInfo = BuildCompletedFieldsJson(completedFields);
                 var executePrompt=prompt +completedFieldsInfo;
                 var messages = new List<Microsoft.Extensions.AI.ChatMessage>
@@ -172,6 +177,14 @@ An array of FIELD_VALUES that are completed based on the latest user input. SHOU
                         // Only add if not already present (based on fieldId)
                         if (!extractedValues.Any(ev => ev.FieldId == newValue.FieldId))
                         {
+                            // Skip if completedFields already has the same value for this field
+                            if (completedFields != null && !string.IsNullOrEmpty(newValue.FieldId) &&
+                                completedFields.TryGetValue(newValue.FieldId, out var existing) &&
+                                string.Equals(existing.Value?.ToString() ?? string.Empty, newValue.Value?.ToString() ?? string.Empty, StringComparison.OrdinalIgnoreCase))
+                            {
+                                continue;
+                            }
+
                             extractedValues.Add(newValue);
                             
                             // Add to completedFields as well
@@ -196,6 +209,7 @@ An array of FIELD_VALUES that are completed based on the latest user input. SHOU
                     else
                     {
                         // All fields extracted or max attempts reached, return aggregated values
+                        attempt = maxAttempts; // Exit loop
                         return extractedValues;
                     }
                 }
@@ -226,6 +240,14 @@ An array of FIELD_VALUES that are completed based on the latest user input. SHOU
                             {
                                 if (!extractedValues.Any(ev => ev.FieldId == newValue.FieldId))
                                 {
+                                    // Skip if completedFields already has the same value for this field
+                                    if (completedFields != null && !string.IsNullOrEmpty(newValue.FieldId) &&
+                                        completedFields.TryGetValue(newValue.FieldId, out var existing) &&
+                                        string.Equals(existing.Value?.ToString() ?? string.Empty, newValue.Value?.ToString() ?? string.Empty, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        continue;
+                                    }
+
                                     extractedValues.Add(newValue);
                                     
                                     if (completedFields != null && !string.IsNullOrEmpty(newValue.FieldId))

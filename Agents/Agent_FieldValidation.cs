@@ -55,10 +55,18 @@ public class Agent_FieldValidation
             }
         }
 
+
+        // Pre-evaluate: exclude ChoiceSet fields whose value already matches a valid choice
+        var fieldsToValidate = PreFilterChoiceSetFields(form, newFieldValues);
+        if (fieldsToValidate.Count == 0)
+        {
+            return new ValidationResult();
+        }
+
         // Build completed fields information as JSON if present
         var completedFieldsInfo = BuildCompletedFieldsInfoJson(completedFields);
         // Build new field information as JSON - only for relevant fields   
-        var newFieldValuesInfo = BuildNewFieldValuesInfoJson(newFieldValues);   
+        var newFieldValuesInfo = BuildNewFieldValuesInfoJson(fieldsToValidate);   
 
         var prompt = $@"You are a validation assistant for an intelligent form completion system. Your job is to validate field values that have been already been extracted from user input and identify any errors or warnings.
 
@@ -265,6 +273,32 @@ If there are not errors or warnings, return an empty object: {{}}
         };
     }
     
+    private List<FormFieldValue> PreFilterChoiceSetFields(Form form, List<FormFieldValue> fieldValues)
+    {
+        var fieldMap = form.Body
+            .Where(f => !string.IsNullOrEmpty(f.Id))
+            .GroupBy(f => f.Id)
+            .ToDictionary(g => g.Key, g => g.First());
+
+        return fieldValues.Where(fv =>
+        {
+            if (string.IsNullOrEmpty(fv.FieldId) || !fieldMap.TryGetValue(fv.FieldId, out var field))
+                return true; // keep unknown fields for validation
+
+            if (!string.Equals(field.Type, "Input.ChoiceSet", StringComparison.OrdinalIgnoreCase))
+                return true; // not a choice set — keep for validation
+
+            if (field.Choices == null || field.Choices.Count == 0)
+                return true; // no choices defined — keep for validation
+
+            var valueStr = fv.Value?.ToString() ?? string.Empty;
+            var isValidChoice = field.Choices.Any(c =>
+                string.Equals(c.Value, valueStr, StringComparison.OrdinalIgnoreCase));
+
+            return !isValidChoice; // exclude if it's already a valid choice
+        }).ToList();
+    }
+
     private string BuildNewFieldValuesInfoJson(List<FormFieldValue>? fieldValues, IEnumerable<string>? excludeFieldIds = null)
     {
         if (fieldValues == null || fieldValues.Count == 0)
