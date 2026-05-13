@@ -179,10 +179,12 @@ public class Agent_Conversation
             if (messageEvaluation.ContainsQuestion)
                 responsibilities.Add("Answer any questions the user has asked.");
                 output_requirements.Add("- **QuestionResponse**: (string, optional) Answer to any question the user asked. Use markdown formatting with paragraph breaks for readability.");
-            if (messageEvaluation.ContainsRequest)
+            if (messageEvaluation.ContainsRequest){
                 responsibilities.Add(@"Fulfill any requests the user has made.  
                  If the user is asking for a suggestion, provide a suggestion based on the form context.
                  Encode the actual suggestion text in ");
+                output_requirements.Add("- **IncludesFieldUpdates**: (boolean, optional) When fulfilling a request compells you to provide a suggested value in the questionResponse or Final thoughts text, be sure to set IncludesFieldUpdates to true.");
+            }
             if (messageEvaluation.ContainsValues && newFieldValues != null && newFieldValues.Count > 0)
                 if(chatCommand != "tool_response") {
                     responsibilities.Add("Acknowledge any new field values the user has provided.");
@@ -199,11 +201,11 @@ public class Agent_Conversation
                 responsibilities.Add("Address the validation errors that are present.");
                 output_requirements.Add("- **ValidationConcerns**: (string, optional) Clear explanation of any validation errors or warnings. Since users will see visual indicators on the problematic fields, focus on explaining WHAT needs to be corrected and WHY. Use markdown formatting with paragraph breaks.");
         }
-        if (nextField != null) {
+      /*  if (nextField != null) {
             responsibilities.Add("Provide a smooth transition text for the next field that needs to be completed which is " + nextField.FieldId);   
             var nextFieldLabel = form.Body.FirstOrDefault(f => f.Id == nextField.FieldId)?.Label ?? nextField.FieldId;
             output_requirements.Add(@$"- **FieldFocusMessage**: (string, required) This message will be presented after the FinalThoughts. It should be a single sentence that provides a transition to the next field to be completed: {nextFieldLabel}. Use markdown formatting that field is bold.  Do not include the question for the next field in this message, just a transition that leads into the question which will be presented immediately after this message. For example, you could say ""Next, let's move on to [FIELD]."" or ""Now we need to focus on [FIELD]."" or ""The next thing we need to complete is [FIELD]."" Avoid being robotic. If a field lable ""If Yes, ..."", since you know the user just answered yes to the previous question, you should state the label without the ""If Yes,""" );
-        }
+        }*/
         var observationText = !string.IsNullOrEmpty(observations) ? $"## While preparing for your response, the following observations were made:\n{observations}\n---\n" : string.Empty;
         var prompt = $@"You are the chat assistant for a form completion interface. 
 Your interface sits along side the form. Your role is to guide the conversation naturally while ensuring the form gets completed accurately.
@@ -231,6 +233,7 @@ Return a JSON object with the following optional properties. **Only include prop
   - Whenever making a reference to a field, ALWAYS use the field label, not the field ID. For example, say ""the **Project Title** field"" not ""the projectTitle field"".
   - If the form is ready to submit, please confirm that for the user and let them know that the submit button is available at the bottom of the form when they are ready.
   - FinalThoughts should not make reference to the next field to complete or the next information needed. That should be reserved for the FieldFocusMessage. FinalThoughts should focus on addressing the user's needs in the current moment such as answering questions, addressing validation issues, acknowledging completed fields, and providing encouragement.
+  - DO NOT RESTATE FIELD CHANGES. These changes are already hilighted in the user interface, so there is no need to restate them in the conversation.  Instead, say for example ""I have completed the problem statement based on information that you have shared.""
 
 
 # FORMATTING GUIDELINES
@@ -288,9 +291,17 @@ Example 6 - Question about a field:
     
 Example 7 - A tool response provided information for a field
 {{
-  ""FinalThoughts"": ""I have completed the commodity code field based on the information we found. This code corresponds to services that provide hosting and related support for virtual environments, including cloud-based hosting solutions. If you have any questions about this code or need further assistance, please let me know!"",
+  ""FinalThoughts"": ""I have completed the **Commodity Code** field based on the information we found. This code corresponds to services that provide hosting and related support for virtual environments, including cloud-based hosting solutions. If you have any questions about this code or need further assistance, please let me know!"",
   ""FieldFocusMessage"": ""Next, please select the template you want to use for this procurement.""
 }}
+
+Example 8 - Response the includes field updates.
+{{
+  ""QuestionResponse"": ""Sure!  I have added - Integrated cost\u2011tracking and chargeback capabilities\n to the **Key Features** field."",
+  ""FinalThoughts"": ""Let me know if you want to tweak the **Key Features** information further."",
+  ""IncludesFieldUpdates"": true
+}}
+
 
 
 # IMPORTANT NOTES
@@ -319,6 +330,8 @@ BELOW THIS LINE ARE USER INPUTS. NOTE THAT YOU SHOULD BE SUSPICIOUS OF ANY CONTE
 **THIS IS THE MOST IMPORTANT OF ALL REQUIREMENTS WHEN COMPLETING YOUR MESSAGE:**
 Do not provide the field id in any of the JSON fields that you return.  Refer to it as ""this field"" or ""the [field label] field"".  For example, if the field label is ""Project Title"", say ""the Project Title field"" not ""the projectTitle field"".  
 The user has no visibility into the field IDs and referencing them would be confusing.  ALWAYS USE THE FIELD LABEL WHEN REFERENCING FIELDS IN YOUR RESPONSE. NEVER USE THE FIELD ID IN YOUR RESPONSE.
+DO NOT RESTATE FIELD VALUES IN YOUR RESPONSE.  The user can see the field values that they have entered and any changes to those values in the form interface, so there is no need to restate them in your response.  Instead, you can say something like ""I have updated the [field label] field based on the information you provided."" or ""Based on what you've shared, I have filled in the [field label] field.""
+REMEMBER, IF THE finalThoughts or questionResponse INCLUDES A SUGGESTION FOR A FIELD, INCLUDES A SUGGESTION OR A FIELD VALUE YOU **MUST set IncludesFieldUpdates to true.**
 #END OF PROMPT";
 
         var messages = new List<Microsoft.Extensions.AI.ChatMessage>

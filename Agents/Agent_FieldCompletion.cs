@@ -29,10 +29,29 @@ public class Agent_FieldCompletion
     /// <param name="form">The form containing fields to check against</param>
     /// <param name="completedFields">List of fields that have already been completed</param>
     /// <returns>List of extracted form field values</returns>
-    public async Task<List<FormFieldValue>> ExtractFieldValuesAsync(List<String> priorDialog, Form form, Dictionary<string, FieldValue>? completedFields = null, string? chatCommand = null)
+    public async Task<List<FormFieldValue>> ExtractFieldValuesAsync(List<String> priorDialog, Form form, Dictionary<string, FieldValue>? completedFields = null, string? chatCommand = null, MessageEvaluationResult? messageEvaluation = null, bool secondPass = false)
     {
         bool anticipateBulkCompletion = chatCommand == "init";
         string toolResponseText = chatCommand == "tool_response"? "The last response from the user was actually a tool response, so you should not expect the user to be providing values for multiple fields at once. Instead, look for information that would help complete the specific field that the tool response was related to." : string.Empty;
+
+        string requestContext =@"Your job is to process user input and extract field values from the user's latest response.
+You only provide the field completions for values that need to be changed or new values.";
+        if (messageEvaluation.ContainsRequest == true)
+        {
+            if (messageEvaluation.ContainsValues == false) { //if there aren't any explicit values in the message, it's still likely a request for information that can be inferred, so we want to make sure the agent is primed to look for those inferences.
+                requestContext ="**The user is making a request** — fulfill their request.  They are likely asking for one or more field values to be generated or derived based on other information that already exists in the form or conversation or information that you can deduce based on the form context. Whenever possible, generate appropriate values for those fields using the available context. If the user is asking for a suggestion, provide a suggestion based on the form context.";            }
+            else {
+                requestContext += "**The user is making a request** — fulfill their request.  They are likely asking for one or more field values to be generated or derived based on other information that already exists in the form or conversation or information that you can deduce based on the form context. Whenever possible, generate appropriate values for those fields using the available context. ";
+            }            
+        }
+        requestContext+=@"If a user doesn't explicitly answer a question, but the answer can be inferred, complete the value but be sure to set 'inferred' to 'true'.
+When the text of a user message provides a field value this would not be considered an inference, but if the user provides a date and you infer that another date is a certain amount of time after that date, that would be an inference.  If you cannot be certain about an inference, do not include it.
+When a user provides a simply one-word answer to a question, it's often the case that this is meant to be a field value, even if the user doesn't explicitly say ""the value for [field] is [value]"".  Use the context of the conversation and the form to determine when this is the case and extract accordingly.";
+        if (secondPass)
+        {
+            requestContext="The assistant has determined that there are additional fields that should be completed. Extract the values from the assistant's repoonse.";
+        }
+
         if (form?.Body == null || form.Body.Count == 0)
         {
             return new List<FormFieldValue>();
@@ -40,7 +59,24 @@ public class Agent_FieldCompletion
 
         // Call Agent_FieldIdentification to filter fields
         var identifiedFields = await _fieldIdentificationAgent.IdentifyAnswerableFieldsAsync(form.Body, priorDialog, chatCommand ?? string.Empty);
-        
+
+        // If the last message carries an [inputFocus: <fieldId>] prefix, ensure that field
+        // is always included in the identified list regardless of what the identification agent returned.
+        var lastMessage = priorDialog.LastOrDefault() ?? string.Empty;
+        var inputFocusMatch = System.Text.RegularExpressions.Regex.Match(
+            lastMessage, @"\[inputFocus:\s*([^\]]+)\]");
+        if (inputFocusMatch.Success)
+        {
+            var focusFieldId = inputFocusMatch.Groups[1].Value.Trim();
+            if (!identifiedFields.Any(f => f.Id == focusFieldId))
+            {
+                var focusField = form.Body.FirstOrDefault(f => f.Id == focusFieldId);
+                if (focusField != null)
+                    identifiedFields.Add(focusField);
+            }
+        }
+
+
         // If no fields were identified, return empty list
         if (identifiedFields.Count == 0)
         {
@@ -64,14 +100,8 @@ public class Agent_FieldCompletion
         
         var fieldsInfo = JsonSerializer.Serialize(fieldsInfoObject, new JsonSerializerOptions { WriteIndented = true });
         var priorDialogString=string.Join("\n", priorDialog);  
-
        var prompt = $@"You are the extractor for an intelligent form completion assistant which is helping a user who is interacting with form fields as well as directly chatting.  
-Your job is to process user input and extract field values from the user's latest response.
-You only provide the field completions for values that need to be changed or new values.
-If a user doesn't explicitly answer a question, but the answer can be inferred, complete the value but be sure to set 'inferred' to 'true'.
-When the text of a user message provides a field value this would not be considered an inference, but if the user provides a date and you infer that another date is a certain amount of time after that date, that would be an inference.  If you cannot be certain about an inference, do not include it.
-The user may ask you to create generate a value for a field based on other information they've provided, in which case you should do your best to generate a value that fits the context, but be sure to set 'inferred' to 'true' and provide a note about how you arrived at the generated value.
-When a user provides a simply one-word answer to a question, it's often the case that this is meant to be a field value, even if the user doesn't explicitly say ""the value for [field] is [value]"".  Use the context of the conversation and the form to determine when this is the case and extract accordingly.
+{requestContext}
 
 # DEFINITIONS
 
@@ -147,8 +177,9 @@ An array of FIELD_VALUES that are completed based on the latest user input. SHOU
 
         // Try up to 5 times to extract field values with 200ms delay between attempts
         List<FormFieldValue> extractedValues = new List<FormFieldValue>();
-        int maxAttempts = chatCommand == "init" ? 5 : 2; // Allow more attempts for init since it's more likely to be a bulk completion and we want to give the model more chances to extract all values
+        int maxAttempts = chatCommand == "init" ? 3 : 2; // Allow more attempts for init since it's more likely to be a bulk completion and we want to give the model more chances to extract all values
         int identifiedFieldsCount = identifiedFields.Count;
+        Console.WriteLine($"[Agent_FieldCompletion] Identified fields ({identifiedFieldsCount}): [{string.Join(", ", identifiedFields.Select(f => f.Id))}]");
         
         for (int attempt = 0; attempt < maxAttempts; attempt++)
         {
@@ -156,7 +187,7 @@ An array of FIELD_VALUES that are completed based on the latest user input. SHOU
             try
             {
                 // Build completed fields information as JSON if present
-                Console.WriteLine($"[Agent_FieldCompletion] Attempt {attempt + 1} to extract field values. Identified fields: [{string.Join(", ", identifiedFields.Select(f => f.Id))}]");
+                Console.WriteLine($"[Agent_FieldCompletion] Attempt {attempt + 1} to extract field values.");
                 var completedFieldsInfo = BuildCompletedFieldsJson(completedFields);
                 var executePrompt=prompt +completedFieldsInfo;
                 var messages = new List<Microsoft.Extensions.AI.ChatMessage>
@@ -216,7 +247,11 @@ An array of FIELD_VALUES that are completed based on the latest user input. SHOU
                 
                 // If no results and this is the last attempt, return what we have
                 if (attempt == maxAttempts - 1)
-                {
+                {                   
+                    if (extractedValues.Count == 0) {
+                        Console.WriteLine("*****FIELD EXTRACTION FAILED *****");
+                        Console.WriteLine($"Prompt: {executePrompt}");
+                    }
                     return extractedValues;
                 }
             }

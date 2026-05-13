@@ -80,7 +80,8 @@ Return ONLY a valid JSON object with no markdown fencing:
 {{{{
   ""priorFieldId"": ""<id of the field most recently completed or focused, if available>"",
   ""fieldId"": ""<id of the next field, or null if complete>"",
-  ""reasoning"": ""<one short sentence explaining why this field was chosen>""
+  ""reasoning"": ""<one short sentence explaining why this field was chosen>"",
+  ""transitionText"": ""Next, let's move on to [FIELD LABEL].""
 }}}}
 
 ---
@@ -102,13 +103,14 @@ Return ONLY a valid JSON object with no markdown fencing:
 2. **Preserve form order** — scan fields using the order to determine the first eligible field.
 3. **If no eligible field remains**, set `fieldId` to null to signal the form is complete.
 4. **Skip requested by user** - if the user is requesting to skip a field, find the next eligible field after the currently focused field. If there are no more eligible fields after the currently focused field, return null. DO NOT RETURN THE SAME FIELD AS THE ONE LAST MENTIONED.
+5. **transitionText** should be a single sentence that provides a transition to the next field to be completed. Use markdown formatting that field is bold.  Do not include the question for the next field in this message, just a transition that leads into the question which will be presented immediately after this message. For example, you could say ""Next, let's move on to **[FIELD LABEL]**."" or ""Now we need to focus on **[FIELD LABEL]**."" or ""The next thing we need to complete is **[FIELD LABEL]**."" Avoid being robotic. If a field label starts with ""If Yes, ..."", since you know the user just answered yes to the previous question, you should state the label without the ""If Yes,"".
 
 {promptOutputSpecsAndFieldInfo}
 
 ## COMPLETED FIELDS
 {completedFieldsInfo}
 
-priorFieldId should not be the same as fieldId!
+priorFieldId should not be the same as fieldId!  Make 
 
 Return ONLY valid JSON matching the structure above.";}
  else
@@ -202,6 +204,8 @@ public class FieldNextResult
 {
     public string? FieldId { get; set; }
     public string? Reasoning { get; set; }
+
+    public string? TransitionText { get; set; } // Optional text to smoothly transition the user to the next field, e.g. "Next, let's move on to [FIELD]."
 
     public string? PriorFieldId { get; set; } // The field that was most recently completed or focused, which influenced this suggestion
 }

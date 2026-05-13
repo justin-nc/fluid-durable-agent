@@ -8,6 +8,8 @@ public class ConversationResponse
     public string? FinalThoughts { get; set; }
     public string? FieldFocusMessage { get; set; }
     public DraftedField? DraftedField { get; set; }
+
+    public bool IncludesFieldUpdates { get; set; } = false;
 }
 
 public class DraftedField
