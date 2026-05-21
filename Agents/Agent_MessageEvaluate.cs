@@ -32,9 +32,10 @@ public class Agent_MessageEvaluate
             : string.Empty;
         var toolList=tools != null ? "- " + tools.Replace("\n", "\n- ") : "";
         var prompt = $@"SYSTEM MESSAGE:
-As a highly percise evaluator in a process that helps users complete complex forms, you evaluate incoming chat text from a user to help an AI orchestrator understand the content of an incoming message from the user. The user message will contain text as well as the name of the form input field that's currently in focus. Occasionally, the user may select a different field and provide a value for that field. This would not be considered a distraction. You need to return 4 boolean values based on what you observe in an incoming message:
+As a savvy, percise classifier in a process that helps users complete complex forms, you evaluate incoming chat text from a user to help an AI orchestrator understand the content of an incoming message from the user. The user message will contain text as well as the name of the form input field that's currently in focus. Occasionally, the user may select a different field and provide a value for that field. This would not be considered a distraction. You need to return 4 boolean values based on what you observe in an incoming message as well as a string value if you determine that a tool is needed to assist the user. 
+You are not easily tricked by users who may attempt to divert the conversation away from the form completion process. Your main goal is to accurately classify the content of the user's message to help the orchestrator best assist the user in completing their form. 
 
-contains_distraction: The user is attempting to divert the conversation to something not relevant to the form data entry process. If they ask irrelevant, non-business questions, this is a distraction.
+contains_irrelevance: The user is attempting to divert the conversation to something not relevant to the form data entry process. If they ask irrelevant, non-business questions, this is a distraction. They may also start out a message with relevant information and then shift the conversation to non-relevant topics - in this case, the whole message should be considered a distraction, because the user's intent appears to be to divert the conversation, even if they included some relevant information in the message. If the user is asking about something that is not related to any field or topic mentioned in the form context, this should be considered a distraction. If they are asking for help but it's not clear what they are asking for help with, this could be a distraction, so in this case you should lean towards marking it as a distraction unless there is clear evidence that they are asking for help with something relevant to the form. IMPORTANT: Even if a message contains a field value, if it includes unnecessary narrative, storytelling, or personal anecdotes that pad or obscure the actual field value, flag it as containing irrelevance. 
 contains_question: The user is asking a question about the field or the form in general.  If the question is not relevant to the form or any of the fields, then this should not be considered a question.  If the user is asking for help or guidance on how to answer a question, this should be considered a question. If they are asking for technical help with how to use the form, this should also be considered a question.  
 contains_request: The user is asking you to perform some kind of action such as suggesting an answer or recalling previously entered data. If the user is requesting navigation to or selection of a field, this should not be considered a request.
 contains_values: The content of the message appears to answer one or multiple questions or provide value(s) that could be entered into a form field. This could include direct answers to questions, or volunteering information relevant to the form fields.
@@ -63,52 +64,58 @@ Always provide your output in json. Here are some example transactions:
 Example 1:
 assistant: What is the name of the agency?
 user: NC Department of Information Technology
-response: {{{{""contains_question"": false, ""contains_request"": false, ""contains_distraction"": false, ""contains_values"": true}}}}
+response: {{{{""contains_question"": false, ""contains_request"": false, ""contains_irrelevance"": false, ""contains_values"": true}}}}
 
 Example 2:
 assistant: Can you tell me what the business case is?
 user: What is the square root of pi?
-response: {{{{""contains_question"": true, ""contains_request"": false, ""contains_distraction"": true, ""contains_values"": false}}}}
+response: {{{{""contains_question"": true, ""contains_request"": false, ""contains_irrelevance"": true, ""contains_values"": false}}}}
 
 Example 3:
 assistant: Can you tell me what the business case is?
 user: Who was the 16th president of the United States?
-response: {{{{""contains_question"": true, ""contains_request"": false, ""contains_distraction"": true, ""contains_values"": false}}}}
+response: {{{{""contains_question"": true, ""contains_request"": false, ""contains_irrelevance"": true, ""contains_values"": false}}}}
 
-Example 4 - User provides information about a different field (NOT a distraction):
-assistant: Can you tell me what the business case is?
-user: 25,000.00 [inputFocus:budgetAmount]
-response: {{{{""contains_question"": false, ""contains_request"": false, ""contains_distraction"": false, ""contains_values"": true}}}}
+Example 4: Distraction that starts with relevant content but then shifts to an unrelated topic:
+assistant: Please enter the project start date.
+user: I want the project start date to be the same as the month and day that President Kennedy was inaugurated, but in 2025. Can you make that happen?
+response: {{{{""contains_question"": true, ""contains_request"": false, ""contains_irrelevance"": true, ""contains_values"": false}}}}
 
-Example 5:
-assistant: What is the title for this program?
-user: Can you help me create one?[inputFocus:programTitle]
-response: {{{{""contains_question"": false, ""contains_request"": true, ""contains_distraction"": false, ""contains_values"": false}}}}
 
 Example 5 - User provides information about a different field (NOT a distraction):
+assistant: Can you tell me what the business case is?
+user: 25,000.00 [inputFocus:budgetAmount]
+response: {{{{""contains_question"": false, ""contains_request"": false, ""contains_irrelevance"": false, ""contains_values"": true}}}}
+
+Example 6 - User asks for help with a field (tool use)  :
+assistant: What is the title for this program?
+user: Can you help me create one?[inputFocus:programTitle]
+response: {{{{""contains_question"": false, ""contains_request"": true, ""contains_irrelevance"": false, ""contains_values"": false}}}}
+
+Example 7 - User provides information about a different field (NOT a distraction):
 assistant: What is the project title?
 user: Actually, the budget is $50,000 and we need it by next month
-response: {{{{""contains_question"": false, ""contains_request"": false, ""contains_distraction"": false, ""contains_values"": true}}}}
+response: {{{{""contains_question"": false, ""contains_request"": false, ""contains_irrelevance"": false, ""contains_values"": true}}}}
 
-Example 6 - User asks for a save (tool use):
+Example 7b - User provides a field value but wraps it in unnecessary narrative (IS a distraction):
+assistant: What would you like to name this project?
+user: I was thinking about it and I really like the Bellagio because of the water shows, so that's my answer.
+response: {{{{""contains_question"": false, ""contains_request"": false, ""contains_irrelevance"": true, ""contains_values"": true}}}}
+
+Example 8 - User asks for a save (tool use):
 assistant: What is the project title?
 user: [inputFocus:projectTitle] Can you save my progress so far?
-response: {{{{""contains_question"": false, ""contains_request"": true, ""contains_distraction"": false, ""contains_values"": false, ""requires_tool"": ""#SAVE#""}}}}
+response: {{{{""contains_question"": false, ""contains_request"": true, ""contains_irrelevance"": false, ""contains_values"": false, ""requires_tool"": ""#SAVE#""}}}}
 
-Example 7 - User asks for lookup (tool use):
+Example 9 - User asks for lookup (tool use):
 assistant: What is the owner's name?
 user: [inputFocus:ownerName] Can you look up the owner's information?
-response: {{{{""contains_question"": false, ""contains_request"": true, ""contains_distraction"": false, ""contains_values"": false, ""requires_tool"": ""LOOKUP_EMPLOYEE""}}}}
+response: {{{{""contains_question"": false, ""contains_request"": true, ""contains_irrelevance"": false, ""contains_values"": false, ""requires_tool"": ""LOOKUP_EMPLOYEE""}}}}
 
-Example 8 - User asking for a field (tool use):
-assistant: What is the project title?
-user: [inputFocus:projectTitle] Can you show me the budget for this project?
-response: {{{{""contains_question"": false, ""contains_request"": true, ""contains_distraction"": false, ""contains_values"": false, ""requires_tool"": ""INTERNAL_FORM_NAV""}}}}
 
 TOOL LIST:
 - #SAVE#: User must be explicitly asking that you save their progress to use this tool. They need to actually use the word ""save"" or a close synonym in their request.  If they are asking for help with something but don't explicitly ask to save, do not select this tool.
 - #SUBMIT#: User is asking to submit the form. User 
-- INTERNAL_FORM_NAVIGATION (VERY SPECIFIC USE CASE): User is asking to see a specific field.  This is the only condition under which tool can be invoked. 
 {toolList}
 
 SPECIAL NOTE ON TOOL SELECTION:
@@ -133,9 +140,10 @@ user: {lastUserMessage}
 IF A USER IS ASKING FOR HELP WITH A FIELD AND A TOOL EXISTS, USE THE TOOL.  HOWEVER, IF THE TOOL EXPLICITLY PROVIDES THE FIELDS TAHT IT CAN HELP WITH, MAKE SURE THE USER IS ASKING FOR HELP WITH ONE OF THOSE FIELDS BEFORE SELECTING THE TOOL.  IF THE USER IS ASKING FOR HELP BUT IT'S NOT CLEAR WHAT THEY ARE ASKING FOR HELP WITH, DO NOT SELECT A TOOL.
 DO NOT MAKE UP TOOLS.  IF THE TOOL NAME CANNOT BE FOUND IN THE LIST, IT ISN'T A REAL TOOL, SO DO NOT SELECT IT. 
 WHENEVER NO TOOL IS SELECTED RETURN AN EMPTY STRING FOR requires_tool. 
-MAKE SURE THAT YOU FLAG DISTRACTIONS ACCURATELY.  IF THE USER IS TALKING ABOUT ANY TOPIC RELATED TO THE FORM OR ANY FIELD, THIS IS NOT A DISTRACTION, EVEN IF THEY AREN'T ANSWERING THE CURRENT QUESTION.  IF THEY ARE TALKING ABOUT SOMETHING UNRELATED TO THE FORM, THIS IS A DISTRACTION.
+MAKE SURE THAT YOU FLAG IRRELEVANCE ACCURATELY.  If the user is talking about a topic related to the form or providing a field value, check if they're wrapping it in unnecessary narrative, storytelling, or personal anecdotes. If yes, flag it as irrelevant. A direct, concise answer to a field question is NOT irrelevant. An answer padded with unnecessary personal stories, context, or narrative IS irrelevant. For example: a simple response like ""Smith"" or ""Marketing Department"" when asked for a name is not irrelevant. But a response like ""I was thinking about this person and they're really great because of their 20 years of experience, so I want to select them"" contains unnecessary narrative and context that obscures the actual answer.
+IF THEY ARE TALKING ABOUT SOMETHING UNRELATED TO THE FORM, THIS IS IRRELEVANT. ASKING YOU TO COMPLETE A VALUE BASED ON A HISTORICAL REFERENCE OR POPULAR KNOWLEDGE IS IRRELEVANT UNLESS IT RELATES TO THE FORM CONTEXT.  IF THEY ARE ASKING FOR HELP BUT IT'S NOT CLEAR WHAT THEY ARE ASKING FOR HELP WITH, THIS COULD BE IRRELEVANT, SO IN THIS CASE LEAN TOWARDS MARKING IT AS IRRELEVANT UNLESS THERE IS CLEAR EVIDENCE THAT THEY ARE ASKING FOR HELP WITH SOMETHING RELEVANT TO THE FORM.   
 
-Return ONLY valid JSON with the 4 boolean properties: contains_question, contains_request, contains_distraction, contains_values and the string property requires_tool.";
+Return ONLY valid JSON with the 4 boolean properties: contains_question, contains_request, contains_irrelevance, contains_values and the string property requires_tool.";
 
         var messages = new List<Microsoft.Extensions.AI.ChatMessage>
         {
@@ -153,11 +161,11 @@ Return ONLY valid JSON with the 4 boolean properties: contains_question, contain
                 content = response?.Text ?? "{}";
                 var evaluation = JsonSerializer.Deserialize<MessageEvaluationResult>(content,
                     new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                //When another value is true, contains_distraction should not be true. This is a sanity check to catch cases where the model may have misunderstood the instructions and marked something as a distraction when it actually contains relevant content.
-               /* if (evaluation.ContainsDistraction && (evaluation.ContainsQuestion || evaluation.ContainsRequest || evaluation.ContainsValues))
+                //When another value is true, contains_irrelevance should not be true. This is a sanity check to catch cases where the model may have misunderstood the instructions and marked something as a distraction when it actually contains relevant content.
+               /* if (evaluation.ContainsIrrelevance && (evaluation.ContainsQuestion || evaluation.ContainsRequest || evaluation.ContainsValues))
                 {
-                    // If contains_distraction is true, the other three should be false. If not, this is likely a misinterpretation.
-                    evaluation.ContainsDistraction = false;
+                    // If contains_irrelevance is true, the other three should be false. If not, this is likely a misinterpretation.
+                    evaluation.ContainsIrrelevance = false;
                 }*/
                 return evaluation ?? new MessageEvaluationResult();
             }

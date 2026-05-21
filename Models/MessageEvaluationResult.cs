@@ -10,8 +10,8 @@ public sealed class MessageEvaluationResult
     [JsonPropertyName("contains_request")]
     public bool ContainsRequest { get; set; }
 
-    [JsonPropertyName("contains_distraction")]
-    public bool ContainsDistraction { get; set; }
+    [JsonPropertyName("contains_irrelevance")]
+    public bool ContainsIrrelevance { get; set; }
 
     [JsonPropertyName("contains_values")]
     public bool ContainsValues { get; set; }

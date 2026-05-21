@@ -24,6 +24,7 @@ public class SessionOrchestrator
     private static readonly string[] EventNames = ["message", "form_action", "token_update", "invalid_input", "tool_call"]; // Add more event names here as needed
     private const string FormsContainer = "forms";
     private const string SessionMappingContainer = "session-mappings";
+    private const string LookupResourcesContainer = "lookup-resources";
     
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -370,15 +371,15 @@ public class SessionOrchestrator
             
             //Look at the message to evaluate its content
             var evaluationStopwatch = Stopwatch.StartNew();
-            var messageEvaluation = new[] { "init", "tool_response" }.Contains(chat_command) ? new MessageEvaluationResult { ContainsQuestion = false, ContainsRequest = false, ContainsDistraction = false, ContainsValues = true } : new MessageEvaluationResult { ContainsQuestion = false, ContainsRequest = false, ContainsDistraction = false, ContainsValues = false };
+            var messageEvaluation = new[] { "init", "tool_response" }.Contains(chat_command) ? new MessageEvaluationResult { ContainsQuestion = false, ContainsRequest = false, ContainsIrrelevance = false, ContainsValues = true } : new MessageEvaluationResult { ContainsQuestion = false, ContainsRequest = false, ContainsIrrelevance = false, ContainsValues = false };
             if (!jumpToConversation && !new[] { "init", "tool_response" }.Contains(chat_command)) {
                 messageEvaluation =await _messageEvaluateAgent.EvaluateMessageAsync(priorMessages, formContext, fieldIds, sectionNames,formTools);
             evaluationStopwatch.Stop();
-            _logger.LogInformation("EvaluateMessageAsync completed in {Seconds:F2} seconds. Question: {Question}, Request: {Request}, Distraction: {Distraction}, Values: {Values}, RequiresTool: {RequiresTool}",
+            _logger.LogInformation("EvaluateMessageAsync completed in {Seconds:F2} seconds. Question: {Question}, Request: {Request}, Irrelevance: {Irrelevance}, Values: {Values}, RequiresTool: {RequiresTool}",
                 evaluationStopwatch.Elapsed.TotalSeconds,
                 messageEvaluation.ContainsQuestion,
                 messageEvaluation.ContainsRequest,
-                messageEvaluation.ContainsDistraction,
+                messageEvaluation.ContainsIrrelevance,
                 messageEvaluation.ContainsValues,
                 messageEvaluation.RequiresTool);
             }
@@ -412,7 +413,7 @@ public class SessionOrchestrator
             var validationResult = new ValidationResult();
 
             // If message contains values, extract and validate field values
-            if ((messageEvaluation.ContainsValues || messageEvaluation.ContainsRequest) && body.Trim().Length > 0)
+            if ((messageEvaluation.ContainsValues || messageEvaluation.ContainsRequest) && !messageEvaluation.ContainsIrrelevance && body.Trim().Length > 0)
             {
                 (newFieldValues, validationResult) = await ExtractAndValidateFieldValuesAsync(
                     priorMessagesClean.TakeLast(5).ToList(),
@@ -447,7 +448,7 @@ public class SessionOrchestrator
 
             // If the conversation agent indicated it contains field updates, run a second extraction pass
             // using the assistant response as additional context, then merge results before determining nextField.
-            if (conversationResponse.IncludesFieldUpdates && newFieldValues.Count == 0) // Only do this if we didn't already extract field values from the user message, to avoid redundant extraction attempts
+            if (conversationResponse.IncludesFieldUpdates && newFieldValues.Count == 0 && !messageEvaluation.ContainsIrrelevance) // Only do this if we didn't already extract field values from the user message, to avoid redundant extraction 
             {
                 var assistantContextParts = new List<string>();
                 if (!string.IsNullOrEmpty(conversationResponse.QuestionResponse))
@@ -467,7 +468,7 @@ public class SessionOrchestrator
                     ContainsValues = true,
                     ContainsQuestion =false,
                     ContainsRequest = false,
-                    ContainsDistraction =false
+                    ContainsIrrelevance =false
                 };
 
                 var (additionalFieldValues, additionalValidationResult) = await ExtractAndValidateFieldValuesAsync(
@@ -1034,6 +1035,132 @@ public class SessionOrchestrator
         }
     }
 
+
+    [Function("SessionOrchestrator_LookupValues_Options")]
+    public HttpResponseData LookupValuesOptions(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "options", Route = "lookupValues/{lookupType}/{encodedAccess}")] HttpRequestData req,
+        string lookupType,
+        string encodedAccess)
+    {
+        var response = req.CreateResponse(HttpStatusCode.OK);
+        response.Headers.Add("Access-Control-Allow-Origin", "*");
+        response.Headers.Add("Access-Control-Allow-Methods", "GET, OPTIONS");
+        response.Headers.Add("Access-Control-Allow-Headers", "Content-Type, Authorization");
+        response.Headers.Add("Access-Control-Max-Age", "86400");
+        return response;
+    }
+
+    [Function("SessionOrchestrator_LookupValues")]
+    public async Task<HttpResponseData> LookupValues(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "lookupValues/{lookupType}/{encodedAccess}")] HttpRequestData req,
+        string lookupType,
+        string encodedAccess,
+        [DurableClient] DurableTaskClient client)
+    {
+        try
+        {
+            // Decode the access string (URL-safe Base64)
+            var normalizedAccess = encodedAccess.Replace("-", "+").Replace("_", "/");
+            var padding = (4 - (normalizedAccess.Length % 4)) % 4;
+            normalizedAccess += new string('=', padding);
+
+            string decodedAccess;
+            try
+            {
+                var accessBytes = Convert.FromBase64String(normalizedAccess);
+                decodedAccess = Encoding.UTF8.GetString(accessBytes);
+            }
+            catch (FormatException)
+            {
+                var badRequest = req.CreateResponse(HttpStatusCode.BadRequest);
+                badRequest.Headers.Add("Content-Type", "application/json");
+                badRequest.Headers.Add("Access-Control-Allow-Origin", "*");
+                await badRequest.WriteStringAsync("{\"error\": \"Invalid access token format\"}");
+                return badRequest;
+            }
+
+            // Parse instanceId and token from decoded value ({instanceId}:{token})
+            var parts = decodedAccess.Split(':');
+            if (parts.Length != 2)
+            {
+                var badRequest = req.CreateResponse(HttpStatusCode.BadRequest);
+                badRequest.Headers.Add("Content-Type", "application/json");
+                badRequest.Headers.Add("Access-Control-Allow-Origin", "*");
+                await badRequest.WriteStringAsync("{\"error\": \"Invalid access token structure\"}");
+                return badRequest;
+            }
+
+            var instanceId = parts[0];
+            var providedToken = parts[1];
+
+            // Get and validate current session state
+            var (currentState, errorResponse) = await GetValidatedStateAsync(client, instanceId, req, includeCorsHeaders: true);
+            if (errorResponse != null)
+                return errorResponse;
+
+            // Validate token match
+            if (string.IsNullOrEmpty(currentState.ClientAccessToken) ||
+                currentState.ClientAccessToken != providedToken)
+            {
+                var unauthorized = req.CreateResponse(HttpStatusCode.Unauthorized);
+                unauthorized.Headers.Add("Content-Type", "application/json");
+                unauthorized.Headers.Add("Access-Control-Allow-Origin", "*");
+                await unauthorized.WriteStringAsync("{\"error\": \"Invalid or expired access token\"}");
+                return unauthorized;
+            }
+
+            // Validate token expiration
+            if (currentState.TokenExpiration.HasValue && currentState.TokenExpiration.Value < DateTime.UtcNow)
+            {
+                var unauthorized = req.CreateResponse(HttpStatusCode.Unauthorized);
+                unauthorized.Headers.Add("Content-Type", "application/json");
+                unauthorized.Headers.Add("Access-Control-Allow-Origin", "*");
+                await unauthorized.WriteStringAsync("{\"error\": \"Access token has expired\"}");
+                return unauthorized;
+            }
+
+            // Validate lookupType to prevent path traversal
+            if (string.IsNullOrWhiteSpace(lookupType) ||
+                lookupType.IndexOfAny(System.IO.Path.GetInvalidFileNameChars()) >= 0 ||
+                lookupType.Contains(".."))
+            {
+                var badRequest = req.CreateResponse(HttpStatusCode.BadRequest);
+                badRequest.Headers.Add("Content-Type", "application/json");
+                badRequest.Headers.Add("Access-Control-Allow-Origin", "*");
+                await badRequest.WriteStringAsync("{\"error\": \"Invalid lookup type\"}");
+                return badRequest;
+            }
+
+            // Read the lookup JSON file from blob storage
+            string lookupJson;
+            try
+            {
+                lookupJson = await _blobStorageService.ReadFileAsync(string.Empty, $"{lookupType}.json", LookupResourcesContainer);
+            }
+            catch (FileNotFoundException)
+            {
+                var notFound = req.CreateResponse(HttpStatusCode.NotFound);
+                notFound.Headers.Add("Content-Type", "application/json");
+                notFound.Headers.Add("Access-Control-Allow-Origin", "*");
+                await notFound.WriteStringAsync(JsonSerializer.Serialize(new { error = $"Lookup type '{lookupType}' not found" }));
+                return notFound;
+            }
+
+            var response = req.CreateResponse(HttpStatusCode.OK);
+            response.Headers.Add("Content-Type", "application/json");
+            response.Headers.Add("Access-Control-Allow-Origin", "*");
+            await response.WriteStringAsync(lookupJson);
+            return response;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "SessionOrchestrator_LookupValues: Error retrieving lookup type '{LookupType}'", lookupType);
+            var errorResponse = req.CreateResponse(HttpStatusCode.InternalServerError);
+            errorResponse.Headers.Add("Access-Control-Allow-Origin", "*");
+            await errorResponse.WriteStringAsync(JsonSerializer.Serialize(new { error = "Failed to retrieve lookup values", message = ex.Message }));
+            return errorResponse;
+        }
+    }
 
     [Function("SessionOrchestrator_Terminate")]
     public async Task<HttpResponseData> Terminate(
