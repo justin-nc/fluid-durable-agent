@@ -370,15 +370,15 @@ public class SessionOrchestrator
             
             //Look at the message to evaluate its content
             var evaluationStopwatch = Stopwatch.StartNew();
-            var messageEvaluation = new[] { "init", "tool_response" }.Contains(chat_command) ? new MessageEvaluationResult { ContainsQuestion = false, ContainsRequest = false, ContainsDistraction = false, ContainsValues = true } : new MessageEvaluationResult { ContainsQuestion = false, ContainsRequest = false, ContainsDistraction = false, ContainsValues = false };
+            var messageEvaluation = new[] { "init", "tool_response" }.Contains(chat_command) ? new MessageEvaluationResult { ContainsQuestion = false, ContainsRequest = false, ContainsIrrelevance = false, ContainsValues = true } : new MessageEvaluationResult { ContainsQuestion = false, ContainsRequest = false, ContainsIrrelevance = false, ContainsValues = false };
             if (!jumpToConversation && !new[] { "init", "tool_response" }.Contains(chat_command)) {
                 messageEvaluation =await _messageEvaluateAgent.EvaluateMessageAsync(priorMessages, formContext, fieldIds, sectionNames,formTools);
             evaluationStopwatch.Stop();
-            _logger.LogInformation("EvaluateMessageAsync completed in {Seconds:F2} seconds. Question: {Question}, Request: {Request}, Distraction: {Distraction}, Values: {Values}, RequiresTool: {RequiresTool}",
+            _logger.LogInformation("EvaluateMessageAsync completed in {Seconds:F2} seconds. Question: {Question}, Request: {Request}, Irrelevance: {Irrelevance}, Values: {Values}, RequiresTool: {RequiresTool}",
                 evaluationStopwatch.Elapsed.TotalSeconds,
                 messageEvaluation.ContainsQuestion,
                 messageEvaluation.ContainsRequest,
-                messageEvaluation.ContainsDistraction,
+                messageEvaluation.ContainsIrrelevance,
                 messageEvaluation.ContainsValues,
                 messageEvaluation.RequiresTool);
             }
@@ -412,7 +412,7 @@ public class SessionOrchestrator
             var validationResult = new ValidationResult();
 
             // If message contains values, extract and validate field values
-            if ((messageEvaluation.ContainsValues || messageEvaluation.ContainsRequest) && body.Trim().Length > 0)
+            if ((messageEvaluation.ContainsValues || messageEvaluation.ContainsRequest) && !messageEvaluation.ContainsIrrelevance && body.Trim().Length > 0)
             {
                 (newFieldValues, validationResult) = await ExtractAndValidateFieldValuesAsync(
                     priorMessagesClean.TakeLast(5).ToList(),
@@ -447,7 +447,7 @@ public class SessionOrchestrator
 
             // If the conversation agent indicated it contains field updates, run a second extraction pass
             // using the assistant response as additional context, then merge results before determining nextField.
-            if (conversationResponse.IncludesFieldUpdates && newFieldValues.Count == 0) // Only do this if we didn't already extract field values from the user message, to avoid redundant extraction attempts
+            if (conversationResponse.IncludesFieldUpdates && newFieldValues.Count == 0 && !messageEvaluation.ContainsIrrelevance) // Only do this if we didn't already extract field values from the user message, to avoid redundant extraction 
             {
                 var assistantContextParts = new List<string>();
                 if (!string.IsNullOrEmpty(conversationResponse.QuestionResponse))
@@ -467,7 +467,7 @@ public class SessionOrchestrator
                     ContainsValues = true,
                     ContainsQuestion =false,
                     ContainsRequest = false,
-                    ContainsDistraction =false
+                    ContainsIrrelevance =false
                 };
 
                 var (additionalFieldValues, additionalValidationResult) = await ExtractAndValidateFieldValuesAsync(

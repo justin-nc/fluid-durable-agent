@@ -12,8 +12,7 @@ Content-Type: application/json
 ###
 @instanceId = {{createSession.response.body.instanceId}}
 
-#@instanceId=b47ad1e9f5a340809e1e3f1192e440ce
-
+@instanceId=cdd57d37d1f04106bfc89bc9329c6c1b
 ####
 GET http://localhost:7071/api/session/{{instanceId}}/debug
 
@@ -52,25 +51,25 @@ POST http://localhost:7071/api/session/{{instanceId}}/message
 
 POST http://localhost:7071/api/session/{{instanceId}}/message
 
-[inputFocus: solicitationVehicletype] explain this field
+[inputFocus: solicitationVehicletype] now, submit
+###
+
+POST http://localhost:7071/api/session/{{instanceId}}/message
+
+[inputFocus: keyFeaturesNeeded] While we are focused on key features, I know it will need to be able to provide on demand hosting, just as I need on demand TV like that tool that was created in the 90's that allowed for time shifting of TV.  Can we name the project after that tool?
 
 ###
 
 POST http://localhost:7071/api/session/{{instanceId}}/message
 
-[inputFocus: keyFeaturesNeeded] can we change the procurement title to "VM Hosting"?
+[inputFocus: titleOfITNeed] Tivo!
 
 ###
 
 POST http://localhost:7071/api/session/{{instanceId}}/message
 
-[inputFocus: titleOfITNeed] Let's set the title to "Virtual Machine Hosting Platform"
+[inputFocus: commodityCode] where is the title?
 
-###
-
-POST http://localhost:7071/api/session/{{instanceId}}/message
-
-[inputFocus: commodityCode] it's for a virtual machine hosting platform, so we need to find the right commodity code for that.  Can you help?
 ###
 POST http://localhost:7071/api/session/{{instanceId}}/message
 
